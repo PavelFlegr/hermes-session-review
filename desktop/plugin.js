@@ -13,6 +13,10 @@ const POLL_MS = 5000
 const ADDED_TINT = 'color-mix(in srgb, #2ea043 18%, transparent)'
 const REMOVED_TINT = 'color-mix(in srgb, #f85149 18%, transparent)'
 
+// The app shell disables text selection; review content must be selectable and copyable.
+const SELECTABLE = { userSelect: 'text', cursor: 'text' }
+const userIsSelectingText = () => Boolean(window.getSelection()?.toString())
+
 const refresh = () => queryClient.invalidateQueries({ queryKey: [ID] })
 
 // --- delivering text to the Hermes session -------------------------------------------
@@ -28,6 +32,16 @@ async function sendToHermesSession(storedSessionId, text) {
   return resumed.session_id
 }
 
+/**
+ * Sessions that saw the old "run this command" instruction keep answering with the command
+ * itself. Unwrap `session-review reply <id> "<answer>" [--resolve]` into just the answer.
+ */
+export function unwrapReplyCommand(text) {
+  const command = /session-review\s+reply\s+\w+\s+"((?:[^"\\]|\\.)*)"\s*(--resolve)?\s*$/.exec(text)
+  if (!command) return { answer: text, resolve: false }
+  return { answer: command[1].replace(/\\(.)/g, '$1'), resolve: Boolean(command[2]) }
+}
+
 /** The agent's final message for a turn becomes its answer in the comment thread. */
 async function postFinalReplyToThread(event) {
   if (event.replayed) return // a reconnect replaying an old turn must not repost it
@@ -40,7 +54,8 @@ async function postFinalReplyToThread(event) {
   const thread = session.comments.find(c => c.id === commentId)?.thread ?? []
   const agentAlreadyAnswered = thread.some(m => m.author === 'agent' && m.time * 1000 >= sentAt)
   if (!agentAlreadyAnswered) {
-    await ctx.rest(`/sessions/${sessionName}/comments/${commentId}/reply`, { method: 'POST', body: { body: text, author: 'agent' } })
+    const { answer, resolve } = unwrapReplyCommand(text)
+    await ctx.rest(`/sessions/${sessionName}/comments/${commentId}/reply`, { method: 'POST', body: { body: answer, author: 'agent', resolve } })
   }
   refresh()
 }
@@ -105,7 +120,7 @@ function CommentThread({ comment, sessionName, session, headCommit }) {
 
   return jsxs('div', {
     className: 'my-1 ml-10 rounded border p-2 text-xs',
-    style: { borderColor: 'var(--ui-stroke-secondary)', opacity: comment.status === 'resolved' ? 0.6 : 1 },
+    style: { ...SELECTABLE, borderColor: 'var(--ui-stroke-secondary)', opacity: comment.status === 'resolved' ? 0.6 : 1 },
     children: [
       jsxs('div', { className: 'mb-1 flex items-center gap-2', children: [
         jsx(Badge, { children: comment.status }),
@@ -162,7 +177,7 @@ function FileDiff({ session, repo, file }) {
     key: comment.id, comment, sessionName: session.name, session, headCommit: repo.head
   }))
 
-  return jsxs('div', { className: 'font-mono text-xs', children: [
+  return jsxs('div', { className: 'font-mono text-xs', style: SELECTABLE, children: [
     ...fileComments.filter(c => !c.line).map(comment => jsx(CommentThread, {
       key: comment.id, comment, sessionName: session.name, session, headCommit: repo.head
     })),
@@ -173,11 +188,11 @@ function FileDiff({ session, repo, file }) {
       const clickable = row.newLine !== undefined
       const line = jsxs('div', {
         key: index,
-        className: 'flex cursor-default whitespace-pre-wrap hover:brightness-110',
-        style: { background: row.kind === 'add' ? ADDED_TINT : row.kind === 'del' ? REMOVED_TINT : undefined },
-        onClick: clickable ? () => setCommentLine(row.newLine) : undefined,
+        className: 'flex whitespace-pre-wrap hover:brightness-110',
+        style: { ...SELECTABLE, background: row.kind === 'add' ? ADDED_TINT : row.kind === 'del' ? REMOVED_TINT : undefined },
+        onClick: clickable ? () => { if (!userIsSelectingText()) setCommentLine(row.newLine) } : undefined,
         children: [
-          jsx('span', { className: 'w-10 shrink-0 select-none pr-2 text-right', style: { color: 'var(--ui-text-quaternary)' }, children: row.newLine ?? '' }),
+          jsx('span', { className: 'w-10 shrink-0 pr-2 text-right', style: { userSelect: 'none', color: 'var(--ui-text-quaternary)' }, children: row.newLine ?? '' }),
           jsx('span', { children: row.text })
         ]
       })

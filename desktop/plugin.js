@@ -3,7 +3,7 @@
 // Data comes from this plugin's Python backend (ctx.rest); comments are delivered to the
 // Hermes session through the gateway (host.request).
 import {
-  Badge, Button, Input, Textarea, ROUTES_AREA, SIDEBAR_NAV_AREA, host, queryClient, useQuery
+  Badge, Button, Input, Textarea, PANES_AREA, ROUTES_AREA, SIDEBAR_NAV_AREA, host, queryClient, useQuery, useValue
 } from '@hermes/plugin-sdk'
 import { useEffect, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
@@ -307,7 +307,8 @@ function MergePanel({ session, onMerged }) {
   ] })
 }
 
-function SessionDetail({ name, onGone }) {
+/** `compact` is the docked pane: narrow, so files stack above the diff and the transcript is the chat itself. */
+function SessionDetail({ name, onGone, compact = false }) {
   const [selected, setSelected] = useState(null) // { repo, path }
   const [showTranscript, setShowTranscript] = useState(true)
   const { data: session, error } = useQuery({
@@ -321,15 +322,15 @@ function SessionDetail({ name, onGone }) {
   const selectedFile = selectedRepo?.files.find(f => f.path === selected?.path)
 
   return jsxs('div', { className: 'flex h-full min-h-0 flex-col', children: [
-    jsxs('div', { className: 'flex items-center gap-3 border-b p-3 text-sm', style: { borderColor: 'var(--ui-stroke-secondary)' }, children: [
+    jsxs('div', { className: 'flex flex-wrap items-center gap-3 border-b p-3 text-sm', style: { borderColor: 'var(--ui-stroke-secondary)' }, children: [
       jsx('b', { children: linked?.title || session.name }),
       jsx('span', { style: { color: 'var(--ui-text-tertiary)' }, children: `${session.repos.length} repos · ${session.comments.filter(c => c.status === 'open').length} open comments` }),
       linked && jsx(Button, { variant: 'ghost', size: 'sm', onClick: () => host.openSession(linked.id, { intent: 'tab' }), children: 'Open session' }),
-      linked && jsx(Button, { variant: 'ghost', size: 'sm', onClick: () => setShowTranscript(!showTranscript), children: showTranscript ? 'Hide transcript' : 'Show transcript' }),
+      linked && !compact && jsx(Button, { variant: 'ghost', size: 'sm', onClick: () => setShowTranscript(!showTranscript), children: showTranscript ? 'Hide transcript' : 'Show transcript' }),
       jsx('div', { className: 'ml-auto', children: jsx(MergePanel, { session, onMerged: () => { refresh(); onGone() } }) })
     ] }),
-    jsxs('div', { className: 'flex min-h-0 flex-1', children: [
-      jsx('div', { className: 'w-72 shrink-0 overflow-auto border-r p-2 text-xs', style: { borderColor: 'var(--ui-stroke-secondary)' }, children:
+    jsxs('div', { className: compact ? 'flex min-h-0 flex-1 flex-col' : 'flex min-h-0 flex-1', children: [
+      jsx('div', { className: compact ? 'max-h-44 shrink-0 overflow-auto border-b p-2 text-xs' : 'w-72 shrink-0 overflow-auto border-r p-2 text-xs', style: { borderColor: 'var(--ui-stroke-secondary)' }, children:
         session.repos.map(repo => jsxs('div', { key: repo.name, className: 'mb-3', children: [
           jsxs('div', { className: 'font-medium', children: [
             repo.name, ' ',
@@ -349,7 +350,7 @@ function SessionDetail({ name, onGone }) {
           ? jsx(FileDiff, { session, repo: selectedRepo, file: selectedFile, key: `${selected.repo}/${selected.path}` })
           : jsx('div', { className: 'p-4 text-sm', style: { color: 'var(--ui-text-tertiary)' }, children: 'Pick a file. Click a line to comment; the comment is sent to the Hermes session.' })
       }),
-      showTranscript && jsx('div', { className: 'w-96 shrink-0 border-l', style: { borderColor: 'var(--ui-stroke-secondary)' }, children:
+      showTranscript && !compact && jsx('div', { className: 'w-96 shrink-0 border-l', style: { borderColor: 'var(--ui-stroke-secondary)' }, children:
         linked
           ? jsx(Transcript, { storedSessionId: linked.id, key: linked.id })
           : jsx('div', { className: 'p-4 text-xs', style: { color: 'var(--ui-text-tertiary)' }, children: 'No Hermes session has this directory as its cwd yet.' })
@@ -419,6 +420,20 @@ function NewSessionForm({ onCreated, onCancel }) {
   ] })
 }
 
+// --- docked pane next to the chat ----------------------------------------------------------
+
+/** Review for whichever chat is focused: found by matching it to a session directory's Hermes sessions. */
+function ReviewPane() {
+  const focusedStoredId = useValue(host.state.focusedStoredSessionId)
+  const { data } = useQuery({ queryKey: [ID, 'list'], queryFn: () => ctx.rest('/sessions'), refetchInterval: POLL_MS })
+  const match = (data?.sessions ?? []).find(s => s.hermes_sessions.some(h => h.id === focusedStoredId))
+  if (!match) {
+    return jsx('div', { className: 'p-4 text-xs', style: { color: 'var(--ui-text-tertiary)' },
+      children: `The focused chat is not a review session (its cwd is not under ${data?.root ?? 'the sessions root'}). Create one from the Session Review page.` })
+  }
+  return jsx(SessionDetail, { name: match.name, key: match.name, compact: true, onGone: () => {} })
+}
+
 // --- page --------------------------------------------------------------------------------
 
 function ReviewPage() {
@@ -464,6 +479,11 @@ export default {
     ctx.onEvent('message.complete', () => refresh())
     ctx.onEvent('message.complete', event => postFinalReplyToThread(event).catch(error => host.notifyError(error, 'Could not post the agent reply')))
     ctx.register({ id: 'page', area: ROUTES_AREA, data: { path: '/session-review' }, render: () => jsx(ReviewPage, {}) })
+    ctx.register({
+      id: 'pane', area: PANES_AREA, title: 'Review',
+      data: { placement: 'right', dock: { pane: 'workspace', pos: 'right' }, width: '520px' },
+      render: () => jsx(ReviewPane, {})
+    })
     ctx.register({ id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: '/session-review', label: 'Session Review', codicon: 'git-pull-request' } })
   }
 }

@@ -695,6 +695,7 @@ function DeletePanel({ session, onDeleted }) {
 function SessionDetail({ name, onGone, compact = false }) {
   const [selected, setSelected] = useState(null) // { repo, path }
   const [showTranscript, setShowTranscript] = useState(true)
+  const focusedStoredId = useValue(host.state.focusedStoredSessionId) // hooks stay above the early returns below
   const { data: session, error } = useQuery({
     queryKey: [ID, 'session', name], queryFn: () => ctx.rest(`/sessions/${name}`), refetchInterval: POLL_MS
   })
@@ -703,6 +704,8 @@ function SessionDetail({ name, onGone, compact = false }) {
 
   const linked = session.hermes_sessions[0]
   const backendOutdated = session.merge_state === undefined
+  // In the docked pane the focused chat is already on screen beside it.
+  const alreadyOpenBesideMe = compact && focusedStoredId === linked?.id
   const selectedRepo = session.repos.find(r => r.name === selected?.repo)
   const selectedFile = selectedRepo?.files.find(f => f.path === selected?.path)
 
@@ -713,7 +716,7 @@ function SessionDetail({ name, onGone, compact = false }) {
       jsx('b', { children: linked?.title || session.name }),
       jsx('span', { style: { color: 'var(--ui-text-tertiary)' }, children: `${session.repos.length} repos · ${session.comments.filter(c => c.status === 'open').length} open comments` }),
       jsx(MergeBadge, { state: session.merge_state, unmergedCommits: session.unmerged_repos, totalCommits: 0 }),
-      linked && jsx(Button, { variant: 'ghost', size: 'sm', onClick: () => host.openSession(linked.id, { intent: 'tab' }), children: 'Open session' }),
+      linked && !alreadyOpenBesideMe && jsx(Button, { variant: 'ghost', size: 'sm', onClick: () => host.openSession(linked.id, { intent: 'tab' }), children: 'Open session' }),
       linked && !compact && jsx(Button, { variant: 'ghost', size: 'sm', onClick: () => setShowTranscript(!showTranscript), children: showTranscript ? 'Hide transcript' : 'Show transcript' }),
       jsx('div', { className: 'ml-auto', children: jsx(DeletePanel, { session, onDeleted: () => { refresh(); onGone() } }) })
     ] }),
@@ -796,18 +799,68 @@ function NewSessionForm({ onCreated, onCancel }) {
   ] })
 }
 
+// --- session list, shared by the page and the docked pane ---------------------------------------
+
+function SessionRows({ sessions, selectedName, onSelect }) {
+  return jsx('div', { children: [
+    ...sessions.map(session => jsxs('div', {
+      key: session.name,
+      className: 'cursor-pointer rounded p-2 hover:bg-(--chrome-action-hover)',
+      style: { fontWeight: selectedName === session.name ? 600 : 400 },
+      onClick: () => onSelect(session.name),
+      children: [
+        jsx('div', { className: 'truncate', children: session.hermes_sessions[0]?.title || session.name }),
+        jsx('div', { className: 'text-xs', style: { color: 'var(--ui-text-tertiary)' },
+          children: [`${session.repos} repos · +${session.additions} −${session.deletions}` + (session.open_comments ? ` · ${session.open_comments} open` : ''), ' · ', jsx(MergeBadge, { state: session.merge_state, unmergedCommits: session.unmerged_repos, totalCommits: 0 })] })
+      ]
+    })),
+    sessions.length === 0 && jsx('div', { className: 'p-2 text-xs', children: 'No session directories yet.' })
+  ] })
+}
+
+function useSessionList() {
+  const { data } = useQuery({ queryKey: [ID, 'list'], queryFn: () => ctx.rest('/sessions'), refetchInterval: POLL_MS })
+  return { root: data?.root, sessions: data?.sessions ?? [] }
+}
+
 // --- docked pane next to the chat ----------------------------------------------------------
 
-/** Review for whichever chat is focused: found by matching it to a session directory's Hermes sessions. */
+/**
+ * A compact copy of the page. It follows the focused chat: when that chat belongs to a review session
+ * (matched through the session's cwd) the pane shows it; the list lets you look at any other session.
+ */
 function ReviewPane() {
   const focusedStoredId = useValue(host.state.focusedStoredSessionId)
-  const { data } = useQuery({ queryKey: [ID, 'list'], queryFn: () => ctx.rest('/sessions'), refetchInterval: POLL_MS })
-  const match = (data?.sessions ?? []).find(s => s.hermes_sessions.some(h => h.id === focusedStoredId))
-  if (!match) {
-    return jsx('div', { className: 'p-4 text-xs', style: { color: 'var(--ui-text-tertiary)' },
-      children: `The focused chat is not a review session (its cwd is not under ${data?.root ?? 'the sessions root'}). Create one from the Session Review page.` })
-  }
-  return jsx(SessionDetail, { name: match.name, key: match.name, compact: true, onGone: () => {} })
+  const { root, sessions } = useSessionList()
+  const [chosenName, setChosenName] = useState(null)
+  const [creating, setCreating] = useState(false)
+  const [listOpen, setListOpen] = useState(true)
+  const focusedSession = sessions.find(s => s.hermes_sessions.some(h => h.id === focusedStoredId))
+
+  // Moving to a different review chat takes the pane with you.
+  useEffect(() => {
+    if (!focusedSession) return
+    setChosenName(null); setCreating(false); setListOpen(false)
+  }, [focusedSession?.name])
+
+  const selectedName = chosenName ?? focusedSession?.name ?? null
+  const choose = name => { setChosenName(name); setCreating(false); setListOpen(false) }
+
+  return jsxs('div', { className: 'flex h-full min-h-0 flex-col text-sm', children: [
+    jsxs('div', { className: 'flex items-center gap-2 border-b px-3 py-1.5', style: { borderColor: 'var(--ui-stroke-secondary)' }, children: [
+      jsx(Button, { size: 'sm', variant: 'ghost', onClick: () => setListOpen(!listOpen),
+        children: jsxs('span', { className: 'flex items-center gap-1', children: [jsx(Codicon, { name: listOpen ? 'chevron-down' : 'chevron-right' }), `Sessions (${sessions.length})`] }) }),
+      jsx(Button, { size: 'sm', className: 'ml-auto', onClick: () => { setCreating(true); setListOpen(false) }, children: 'New' })
+    ] }),
+    listOpen && jsx('div', { className: 'max-h-56 shrink-0 overflow-auto border-b p-1', style: { borderColor: 'var(--ui-stroke-secondary)' },
+      children: jsx(SessionRows, { sessions, selectedName, onSelect: choose }) }),
+    jsx('div', { className: 'min-h-0 flex-1 overflow-auto', children: creating
+      ? jsx(NewSessionForm, { onCreated: choose, onCancel: () => setCreating(false) })
+      : selectedName
+        ? jsx(SessionDetail, { name: selectedName, key: selectedName, compact: true, onGone: () => setChosenName(null) })
+        : jsx('div', { className: 'p-4 text-xs', style: { color: 'var(--ui-text-tertiary)' },
+            children: `The focused chat is not a review session (its cwd is not under ${root ?? 'the sessions root'}). Pick a session above or create one.` }) })
+  ] })
 }
 
 // --- page --------------------------------------------------------------------------------
@@ -815,27 +868,13 @@ function ReviewPane() {
 function ReviewPage() {
   const [selectedName, setSelectedName] = useState(null)
   const [creating, setCreating] = useState(false)
-  const { data } = useQuery({
-    queryKey: [ID, 'list'], queryFn: () => ctx.rest('/sessions'), refetchInterval: POLL_MS
-  })
-  const sessions = data?.sessions ?? []
+  const { root, sessions } = useSessionList()
 
   return jsxs('div', { className: 'flex h-full min-h-0', children: [
     jsxs('div', { className: 'w-64 shrink-0 overflow-auto border-r p-2 text-sm', style: { borderColor: 'var(--ui-stroke-secondary)' }, children: [
       jsx(Button, { size: 'sm', className: 'mb-2 w-full', onClick: () => { setCreating(true); setSelectedName(null) }, children: 'New review session' }),
-      jsx('div', { className: 'mb-2 text-xs', style: { color: 'var(--ui-text-tertiary)' }, children: data?.root ?? '' }),
-      ...sessions.map(session => jsxs('div', {
-        key: session.name,
-        className: 'cursor-pointer rounded p-2 hover:bg-(--chrome-action-hover)',
-        style: { fontWeight: selectedName === session.name ? 600 : 400 },
-        onClick: () => { setCreating(false); setSelectedName(session.name) },
-        children: [
-          jsx('div', { className: 'truncate', children: session.hermes_sessions[0]?.title || session.name }),
-          jsx('div', { className: 'text-xs', style: { color: 'var(--ui-text-tertiary)' },
-            children: [`${session.repos} repos · +${session.additions} −${session.deletions}` + (session.open_comments ? ` · ${session.open_comments} open` : ''), ' · ', jsx(MergeBadge, { state: session.merge_state, unmergedCommits: session.unmerged_repos, totalCommits: 0 })] })
-        ]
-      })),
-      sessions.length === 0 && jsx('div', { className: 'text-xs', children: 'No session directories yet.' })
+      jsx('div', { className: 'mb-2 text-xs', style: { color: 'var(--ui-text-tertiary)' }, children: root ?? '' }),
+      jsx(SessionRows, { sessions, selectedName, onSelect: name => { setCreating(false); setSelectedName(name) } })
     ] }),
     jsx('div', { className: 'min-w-0 flex-1', children: creating
       ? jsx(NewSessionForm, { onCreated: name => { setCreating(false); setSelectedName(name) }, onCancel: () => setCreating(false) })

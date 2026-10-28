@@ -81,7 +81,7 @@ def list_sessions():
 
 @router.get("/repos")
 def candidate_repos():
-    return {"repos": core.list_candidate_repos(), "sessions_root": str(core.sessions_root()), "cli_path": str(core.CLI_PATH)}
+    return {"repos": core.list_candidate_repos(), "sessions_root": str(core.sessions_root()), "cli_command": core.cli_command()}
 
 
 @router.post("/sessions")

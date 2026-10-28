@@ -663,10 +663,10 @@ function SessionDetail({ name, onGone }) {
 // --- creating a review session -----------------------------------------------------------
 
 /** What the agent is told when a review session starts; later comments arrive as plain messages. */
-function reviewSessionBrief({ name, directory, repoNames, task, cliPath }) {
+function reviewSessionBrief({ name, directory, repoNames, task, cliCommand }) {
   const repoLine = repoNames.length
     ? `It contains one git worktree per repository (${repoNames.join(', ')}), each on branch hermes/${name}.`
-    : `It contains no repositories yet. Before you change any repository, add it to this session with: ${cliPath} add-repo ${name} <path-to-repo> ` +
+    : `It contains no repositories yet. Before you change any repository, add it to this session with: ${cliCommand} add-repo ${name} <path-to-repo> (in PowerShell prefix the command with &) ` +
       '(creates a worktree on branch hermes/' + name + ' here). Never edit a repository outside this directory.'
   return [
     `This is a review-style session named "${name}". Your working directory is ${directory}.`,
@@ -693,9 +693,9 @@ function NewSessionForm({ onCreated, onCancel }) {
     try {
       const made = await ctx.rest('/sessions', { method: 'POST', body: { name, repos: chosen } })
       const live = await host.request('session.create', { cwd: made.path, cwd_explicit: true, title: name })
-      const repoNames = chosen.map(path => path.split('/').pop())
+      const repoNames = chosen.map(path => path.split(/[\\/]/).pop())
       if (task.trim()) {
-        await host.request('prompt.submit', { session_id: live.session_id, text: reviewSessionBrief({ name, directory: made.path, repoNames, task: task.trim(), cliPath: data.cli_path }) })
+        await host.request('prompt.submit', { session_id: live.session_id, text: reviewSessionBrief({ name, directory: made.path, repoNames, task: task.trim(), cliCommand: data.cli_command }) })
       }
       refresh()
       onCreated(name)

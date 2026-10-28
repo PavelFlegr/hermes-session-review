@@ -8,22 +8,32 @@ Stdlib only, so the HTTP routes, the CLI and the tests all share it.
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import re
 import sqlite3
 import subprocess
+import sys
 import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
 REVIEW_DIRNAME = ".review"
 COMMENTS_FILENAME = "comments.json"
 FALLBACK_BASE_BRANCHES = ("main", "master")
 CLI_PATH = Path(__file__).resolve().parent / "bin" / "session-review"
+
+
+def cli_command() -> str:
+    """Shell command that runs the helper with this Python (Windows cannot execute the script directly)."""
+    return f'"{Path(sys.executable).as_posix()}" "{CLI_PATH.as_posix()}"'
 
 
 class ReviewError(Exception):
@@ -36,7 +46,7 @@ def _setting(env_name: str, config_key: str, default: Path) -> Path:
         return Path(os.environ[env_name]).expanduser()
     config_file = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")) / "plugin-data" / "session-review" / "config.json"
     if config_file.exists():
-        configured = json.loads(config_file.read_text()).get(config_key)
+        configured = json.loads(config_file.read_text(encoding="utf-8")).get(config_key)
         if configured:
             return Path(configured).expanduser()
     return default
@@ -46,10 +56,14 @@ def sessions_root() -> Path:
     return _setting("HERMES_SESSIONS_ROOT", "sessions_root", Path.home() / "Projects" / "sessions")
 
 
+def run_git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    """Run git and decode its output as UTF-8, whatever the platform's default code page is."""
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
+
+
 def git(repo: Path, *args: str, check: bool = True) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True, errors="replace"
-    )
+    result = run_git(repo, *args)
     if check and result.returncode != 0:
         raise ReviewError(f"git {' '.join(args)} failed in {repo}: {result.stderr.strip()}")
     return result.stdout
@@ -216,7 +230,7 @@ def _name_status(worktree: Path, base_commit: str) -> dict[str, str]:
 
 def _count_lines(path: Path) -> int:
     try:
-        return len(path.read_text(errors="replace").splitlines())
+        return len(path.read_text(encoding="utf-8", errors="replace").splitlines())
     except OSError:
         return 0
 
@@ -226,11 +240,8 @@ def file_patch(worktree: Path, base_commit: str, path: str) -> str:
     is_tracked = bool(git(worktree, "ls-files", "--", path).strip())
     if is_tracked or _exists_in_commit(worktree, base_commit, path):
         return git(worktree, "diff", "--no-renames", base_commit, "--", path)
-    result = subprocess.run(
-        ["git", "-C", str(worktree), "diff", "--no-index", "--", "/dev/null", path],
-        capture_output=True, text=True, errors="replace",
-    )
-    return result.stdout  # exit code 1 means "differs", which is expected here
+    # `--no-index` against the null device; exit code 1 means "differs", which is expected here.
+    return run_git(worktree, "diff", "--no-index", "--", os.devnull, path).stdout
 
 
 def _exists_in_commit(worktree: Path, commit: str, path: str) -> bool:
@@ -303,7 +314,27 @@ def _comments_path(session: Path) -> Path:
 
 def load_comments(session: Path) -> list[dict]:
     path = _comments_path(session)
-    return json.loads(path.read_text()) if path.exists() else []
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+
+
+@contextmanager
+def _exclusive_lock(lock_file: Path):
+    """Cross-process lock: flock on Unix, a one-byte msvcrt lock on Windows (which needs a byte to lock)."""
+    with open(lock_file, "a+b") as handle:
+        if os.name == "nt":
+            if os.fstat(handle.fileno()).st_size == 0:
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)  # retries for ~10 s, then raises OSError
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            yield
 
 
 @contextmanager
@@ -311,12 +342,11 @@ def _locked_comments(session: Path):
     """Read-modify-write the comments file; the lock keeps the UI and the agent from clobbering each other."""
     path = _comments_path(session)
     path.parent.mkdir(exist_ok=True)
-    with open(path.parent / ".lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with _exclusive_lock(path.parent / ".lock"):
         comments = load_comments(session)
         yield comments
         temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(comments, indent=2))
+        temporary.write_text(json.dumps(comments, indent=2), encoding="utf-8")
         temporary.replace(path)
 
 
@@ -372,7 +402,7 @@ def linked_hermes_sessions(session: Path, state_db: Path | None = None) -> list[
     state_db = state_db or Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")) / "state.db"
     if not state_db.exists():
         return []
-    connection = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
+    connection = sqlite3.connect(f"{state_db.resolve().as_uri()}?mode=ro", uri=True)
     try:
         rows = connection.execute(
             "SELECT id, title, last_activity_at, message_count, ended_at FROM sessions "
@@ -408,11 +438,14 @@ def delete_session(session: Path, *, dry_run: bool = False) -> list[str]:
     log.append(f"remove {session}")
     if dry_run:
         return log
-    for worktree, source, branch, fully_merged in removals:
-        git(source, "worktree", "remove", "--force", str(worktree))
-        if fully_merged:
-            git(source, "branch", "-D", branch)
-    _remove_review_state(session)
+    try:
+        for worktree, source, branch, fully_merged in removals:
+            git(source, "worktree", "remove", "--force", str(worktree))
+            if fully_merged:
+                git(source, "branch", "-D", branch)
+        _remove_review_state(session)
+    except (OSError, ReviewError) as error:
+        raise ReviewError(f"could not remove {session} (is a terminal or editor still using it?): {error}") from error
     return log
 
 

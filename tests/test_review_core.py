@@ -16,6 +16,7 @@ def workspace(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     run(source, "git", "init", "-q", "-b", "main")
+    run(source, "git", "config", "core.autocrlf", "false")
     run(source, "git", "config", "user.email", "t@example.com")
     run(source, "git", "config", "user.name", "T")
     (source / "a.txt").write_text("one\ntwo\n")
@@ -150,6 +151,7 @@ def created(tmp_path, monkeypatch):
     source = tmp_path / "proj"
     source.mkdir()
     run(source, "git", "init", "-q", "-b", "main")
+    run(source, "git", "config", "core.autocrlf", "false")
     run(source, "git", "config", "user.email", "t@example.com")
     run(source, "git", "config", "user.name", "T")
     (source / "a.txt").write_text("one\n")
@@ -214,3 +216,43 @@ def test_settings_come_from_env_then_config_file_then_default(tmp_path, monkeypa
     assert core.sessions_root() == Path.home() / "work" / "reviews"
     monkeypatch.setenv("HERMES_SESSIONS_ROOT", str(tmp_path / "env"))
     assert core.sessions_root() == tmp_path / "env"
+
+
+def test_concurrent_comments_are_not_lost(workspace):
+    import threading
+    _, session, _ = workspace
+    workers = [threading.Thread(target=core.add_comment, kwargs=dict(
+        session=session, repo="source", path="a.txt", line=i, commit=None, body=f"c{i}")) for i in range(12)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    assert sorted(c["line"] for c in core.load_comments(session)) == list(range(12))
+
+
+def test_non_ascii_content_survives_the_diff(workspace):
+    _, _, worktree = workspace
+    base = core.resolve_repo_base(worktree).fork_point
+    (worktree / "a.txt").write_text("one\nzażółć gęślą jaźń — 日本語\n", encoding="utf-8")
+    (worktree / "u.txt").write_text("přidáno\n", encoding="utf-8")
+    assert "zażółć gęślą jaźń — 日本語" in core.file_patch(worktree, base, "a.txt")
+    assert "přidáno" in core.file_patch(worktree, base, "u.txt")
+
+
+def test_linked_hermes_sessions_reads_state_db_read_only(tmp_path):
+    import sqlite3
+    session = tmp_path / "sessions" / "s"
+    session.mkdir(parents=True)
+    db = tmp_path / "state.db"
+    connection = sqlite3.connect(db)
+    connection.execute("CREATE TABLE sessions (id TEXT, title TEXT, last_activity_at REAL, message_count INT, ended_at REAL, cwd TEXT)")
+    connection.execute("INSERT INTO sessions VALUES ('a', 'inside', 2, 1, NULL, ?)", (str(session / "repo"),))
+    connection.execute("INSERT INTO sessions VALUES ('b', 'elsewhere', 1, 1, NULL, ?)", (str(tmp_path / "other"),))
+    connection.commit()
+    connection.close()
+    assert [row["id"] for row in core.linked_hermes_sessions(session, db)] == ["a"]
+
+
+def test_cli_command_quotes_both_paths():
+    command = core.cli_command()
+    assert command.count('"') == 4 and command.endswith('session-review"')

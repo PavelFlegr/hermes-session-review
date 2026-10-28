@@ -516,6 +516,7 @@ export function mergeBadge(state, unmergedCommits = 0, totalCommits = 0) {
 }
 
 function MergeBadge({ state, unmergedCommits, totalCommits }) {
+  if (state === undefined) return null // an outdated backend does not send merge state; the banner explains it
   const badge = mergeBadge(state, unmergedCommits, totalCommits)
   return jsxs('span', { className: 'inline-flex items-center gap-1 whitespace-nowrap', style: { color: badge.color }, children: [jsx(Codicon, { name: badge.icon }), badge.label] })
 }
@@ -524,7 +525,7 @@ function CommitList({ commits }) {
   return jsx('div', { className: 'mb-1 pl-5', children: commits.map(commit => jsxs('div', {
     key: commit.sha, className: 'flex items-center gap-1.5 py-0.5', title: commit.merged ? 'In the base branch' : 'Not in the base branch yet', style: SELECTABLE,
     children: [
-      jsx(Codicon, { name: commit.merged ? 'pass-filled' : 'circle-large-outline', style: { color: commit.merged ? MERGED_GREEN : UNMERGED_AMBER } }),
+      commit.merged !== undefined && jsx(Codicon, { name: commit.merged ? 'pass-filled' : 'circle-large-outline', style: { color: commit.merged ? MERGED_GREEN : UNMERGED_AMBER } }),
       jsx('span', { className: 'font-mono', style: { color: 'var(--ui-text-tertiary)' }, children: commit.sha.slice(0, 7) }),
       jsx('span', { className: 'min-w-0 truncate', children: commit.subject })
     ]
@@ -701,10 +702,13 @@ function SessionDetail({ name, onGone, compact = false }) {
   if (!session) return jsx('div', { className: 'p-4 text-sm', children: 'Loading…' })
 
   const linked = session.hermes_sessions[0]
+  const backendOutdated = session.merge_state === undefined
   const selectedRepo = session.repos.find(r => r.name === selected?.repo)
   const selectedFile = selectedRepo?.files.find(f => f.path === selected?.path)
 
   return jsxs('div', { className: 'flex h-full min-h-0 flex-col', children: [
+    backendOutdated && jsx('div', { className: 'border-b px-3 py-1.5 text-xs', style: { background: 'color-mix(in srgb, #d29922 18%, transparent)', borderColor: 'var(--ui-stroke-secondary)' },
+      children: 'The Session Review backend is out of date, so merge status and delete are unavailable. Restart the gateway to load the new version.' }),
     jsxs('div', { className: 'flex flex-wrap items-center gap-3 border-b p-3 text-sm', style: { borderColor: 'var(--ui-stroke-secondary)' }, children: [
       jsx('b', { children: linked?.title || session.name }),
       jsx('span', { style: { color: 'var(--ui-text-tertiary)' }, children: `${session.repos.length} repos · ${session.comments.filter(c => c.status === 'open').length} open comments` }),

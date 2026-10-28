@@ -1,11 +1,11 @@
-// Session Review: merge-request style review of Hermes sessions.
+// Session Review: merge-request style review of Hermes sessions, shown as a pane docked next to the chat.
 // A session is a directory under the sessions root; each child worktree is an affected repo.
 // Data comes from this plugin's Python backend (ctx.rest); comments are delivered to the
 // Hermes session through the gateway (host.request).
 import {
-  Badge, Button, Codicon, Input, Textarea, PANES_AREA, ROUTES_AREA, SIDEBAR_NAV_AREA, host, queryClient, useQuery, useValue
+  Badge, Button, Codicon, Input, Textarea, PANES_AREA, host, queryClient, useQuery, useValue
 } from '@hermes/plugin-sdk'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'session-review'
@@ -371,7 +371,7 @@ function HunkBar({ text }) {
   return jsx('div', { className: 'flex px-3 py-0.5', style: { background: HUNK_BAR, color: 'var(--ui-text-tertiary)', minWidth: 'max-content', userSelect: 'none' }, children: label ? `${text.split('@@')[1].trim()}   ${label}` : text.split('@@')[1]?.trim() ?? text })
 }
 
-function FileHeader({ file, mode, onMode, compact }) {
+function FileHeader({ file, mode, onMode }) {
   const slash = file.path.lastIndexOf('/')
   return jsxs('div', { className: 'sticky top-0 z-10 flex items-center gap-2 border-b px-3 py-1.5 text-xs', style: { background: 'var(--ui-surface, var(--background))', borderColor: 'var(--ui-stroke-secondary)' }, children: [
     jsxs('span', { className: 'min-w-0 truncate', style: SELECTABLE, children: [
@@ -381,17 +381,17 @@ function FileHeader({ file, mode, onMode, compact }) {
     jsx(Badge, { children: file.status }),
     jsx('span', { style: { color: '#2ea043' }, children: `+${file.additions}` }),
     jsx('span', { style: { color: '#f85149' }, children: `−${file.deletions}` }),
-    !compact && jsxs('span', { className: 'ml-auto flex gap-1', children: [
+    jsxs('span', { className: 'ml-auto flex gap-1', children: [
       jsx(Button, { size: 'sm', variant: mode === 'unified' ? undefined : 'ghost', onClick: () => onMode('unified'), children: 'Unified' }),
       jsx(Button, { size: 'sm', variant: mode === 'split' ? undefined : 'ghost', onClick: () => onMode('split'), children: 'Split' })
     ] })
   ] })
 }
 
-function FileDiff({ session, repo, file, compact }) {
+function FileDiff({ session, repo, file }) {
   const [commentLine, setCommentLine] = useState(null)
   const [storedMode, setStoredMode] = useState(() => window.localStorage.getItem(DIFF_MODE_KEY) ?? 'unified')
-  const mode = compact ? 'unified' : storedMode
+  const mode = storedMode
   const chooseMode = next => { window.localStorage.setItem(DIFF_MODE_KEY, next); setStoredMode(next) }
 
   const { data } = useQuery({
@@ -423,241 +423,11 @@ function FileDiff({ session, repo, file, compact }) {
       : [jsx(UnifiedRow, { key: index, row, language, onSelect: row.newLine !== undefined ? selectLine(row.newLine) : undefined }), ...commentUiAfter(row.newLine, index)])
 
   return jsxs('div', { children: [
-    jsx(FileHeader, { file, mode, onMode: chooseMode, compact }),
+    jsx(FileHeader, { file, mode, onMode: chooseMode }),
     ...fileComments.filter(c => !c.line).map(comment => jsx(CommentThread, { key: comment.id, comment, sessionName: session.name, session, headCommit: repo.head })),
     rows.length === 0
       ? jsx('div', { className: 'p-4 text-xs', style: { color: 'var(--ui-text-tertiary)' }, children: data ? 'No textual changes (binary file, mode change, or empty).' : 'Loading…' })
       : jsx('div', { className: 'overflow-x-auto', style: DIFF_FONT, children: jsx('div', { style: { minWidth: '100%', width: 'max-content' }, children: body }) })
-  ] })
-}
-
-// --- session transcript --------------------------------------------------------------------
-
-/** Split text on ``` fences so code renders monospaced; everything else keeps its line breaks. */
-function MessageText({ text }) {
-  return jsx('div', { className: 'whitespace-pre-wrap break-words', children: text.split(/(```[\s\S]*?```)/g).map((part, index) =>
-    part.startsWith('```')
-      ? jsx('pre', { key: index, className: 'my-1 overflow-auto rounded p-2 font-mono text-[0.6875rem]', style: { background: 'var(--ui-stroke-secondary)' }, children: part.replace(/^```\w*\n?|```$/g, '') })
-      : jsx('span', { key: index, children: part })
-  ) })
-}
-
-function TranscriptRow({ message }) {
-  const text = (message.text ?? (typeof message.content === 'string' ? message.content : '') ?? '').trim()
-  if (message.role === 'tool') {
-    const label = [message.name, message.context].filter(Boolean).join(' ')
-    return label ? jsx('div', { className: 'truncate text-[0.6875rem]', style: { ...SELECTABLE, color: 'var(--ui-text-quaternary)' }, children: `▸ ${label}` }) : null
-  }
-  if (!text) return null
-  const isUser = message.role === 'user'
-  return jsxs('div', { className: 'rounded p-2', style: { ...SELECTABLE, background: isUser ? 'var(--ui-stroke-secondary)' : undefined }, children: [
-    jsx('div', { className: 'mb-0.5 text-[0.6875rem] font-medium', style: { color: 'var(--ui-text-tertiary)' }, children: isUser ? 'You' : 'Agent' }),
-    jsx(MessageText, { text })
-  ] })
-}
-
-function Transcript({ storedSessionId }) {
-  const [draft, setDraft] = useState('')
-  const scroller = useRef(null)
-  const { data } = useQuery({
-    queryKey: [ID, 'transcript', storedSessionId],
-    queryFn: async () => {
-      // Resuming reuses the live session; history needs its runtime id.
-      const resumed = await host.request('session.resume', { session_id: storedSessionId, lazy: true })
-      return host.request('session.history', { session_id: resumed.session_id })
-    },
-    refetchInterval: POLL_MS
-  })
-  const messages = data?.messages ?? []
-
-  // Follow new messages only when the reader is already at the bottom.
-  useEffect(() => {
-    const element = scroller.current
-    if (element && element.scrollHeight - element.scrollTop - element.clientHeight < 120) element.scrollTop = element.scrollHeight
-  }, [messages.length])
-
-  const send = async () => {
-    const text = draft.trim()
-    if (!text) return
-    setDraft('')
-    try {
-      await sendToHermesSession(storedSessionId, text)
-      refresh()
-    } catch (error) {
-      setDraft(text)
-      host.notifyError(error, 'Could not send the message')
-    }
-  }
-
-  return jsxs('div', { className: 'flex h-full min-h-0 flex-col text-xs', children: [
-    jsx('div', { ref: scroller, className: 'flex min-h-0 flex-1 flex-col gap-1 overflow-auto p-2', children: messages.map((message, index) => jsx(TranscriptRow, { key: message.row_id ?? index, message })) }),
-    jsxs('div', { className: 'flex gap-2 border-t p-2', style: { borderColor: 'var(--ui-stroke-secondary)' }, children: [
-      jsx(Textarea, {
-        rows: 2, value: draft, placeholder: 'Message the session…  (Enter sends, Shift+Enter newline)',
-        onChange: e => setDraft(e.target.value),
-        onKeyDown: e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }
-      }),
-      jsx(Button, { size: 'sm', disabled: !draft.trim(), onClick: send, children: 'Send' })
-    ] })
-  ] })
-}
-
-// --- merge indicators --------------------------------------------------------------------------
-
-const MERGED_GREEN = '#2ea043'
-const UNMERGED_AMBER = '#d29922'
-
-/** Label and colour for a repo's (or a whole session's) relation to its base branch. */
-export function mergeBadge(state, unmergedCommits = 0, totalCommits = 0) {
-  if (state === 'merged') return { label: 'Merged', color: MERGED_GREEN, icon: 'git-merge' }
-  if (state === 'partial') return { label: `${unmergedCommits} of ${totalCommits} unmerged`, color: UNMERGED_AMBER, icon: 'git-pull-request' }
-  if (state === 'unmerged') return { label: totalCommits ? `${unmergedCommits} unmerged` : 'Unmerged', color: UNMERGED_AMBER, icon: 'git-pull-request' }
-  return { label: 'No commits', color: 'var(--ui-text-quaternary)', icon: 'circle-outline' }
-}
-
-function MergeBadge({ state, unmergedCommits, totalCommits }) {
-  if (state === undefined) return null // an outdated backend does not send merge state; the banner explains it
-  const badge = mergeBadge(state, unmergedCommits, totalCommits)
-  return jsxs('span', { className: 'inline-flex items-center gap-1 whitespace-nowrap', style: { color: badge.color }, children: [jsx(Codicon, { name: badge.icon }), badge.label] })
-}
-
-function CommitList({ commits }) {
-  return jsx('div', { className: 'mb-1 pl-5', children: commits.map(commit => jsxs('div', {
-    key: commit.sha, className: 'flex items-center gap-1.5 py-0.5', title: commit.merged ? 'In the base branch' : 'Not in the base branch yet', style: SELECTABLE,
-    children: [
-      commit.merged !== undefined && jsx(Codicon, { name: commit.merged ? 'pass-filled' : 'circle-large-outline', style: { color: commit.merged ? MERGED_GREEN : UNMERGED_AMBER } }),
-      jsx('span', { className: 'font-mono', style: { color: 'var(--ui-text-tertiary)' }, children: commit.sha.slice(0, 7) }),
-      jsx('span', { className: 'min-w-0 truncate', children: commit.subject })
-    ]
-  })) })
-}
-
-// --- file tree ---------------------------------------------------------------------------------
-
-/**
- * Nest changed files into folders. Chains of folders with a single folder child are merged into one
- * row ("src/app/ui"), folders sort before files, and folders carry their files' summed stats.
- */
-export function buildFileTree(files) {
-  const root = { kind: 'dir', name: '', path: '', children: [] }
-  for (const file of files) {
-    const parts = file.path.split('/')
-    let directory = root
-    parts.slice(0, -1).forEach((part, depth) => {
-      const path = parts.slice(0, depth + 1).join('/')
-      let child = directory.children.find(c => c.kind === 'dir' && c.path === path)
-      if (!child) { child = { kind: 'dir', name: part, path, children: [] }; directory.children.push(child) }
-      directory = child
-    })
-    directory.children.push({ kind: 'file', name: parts[parts.length - 1], path: file.path, file })
-  }
-  return finishTree(root.children)
-}
-
-function finishTree(nodes) {
-  const finished = nodes.map(node => {
-    if (node.kind === 'file') return node
-    let directory = { ...node, children: finishTree(node.children) }
-    while (directory.children.length === 1 && directory.children[0].kind === 'dir') {
-      const only = directory.children[0]
-      directory = { ...only, name: `${directory.name}/${only.name}` }
-    }
-    return { ...directory, ...sumStats(directory.children) }
-  })
-  return finished.sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === 'dir' ? -1 : 1))
-}
-
-function sumStats(children) {
-  return children.reduce((total, child) => {
-    const stats = child.kind === 'file' ? { files: 1, additions: child.file.additions, deletions: child.file.deletions } : child
-    return { files: total.files + stats.files, additions: total.additions + stats.additions, deletions: total.deletions + stats.deletions }
-  }, { files: 0, additions: 0, deletions: 0 })
-}
-
-export function filterFiles(files, query) {
-  const needle = query.trim().toLowerCase()
-  return needle ? files.filter(file => file.path.toLowerCase().includes(needle)) : files
-}
-
-const STATUS_MARK = {
-  added: { letter: 'A', color: '#2ea043' },
-  untracked: { letter: 'U', color: '#2ea043' },
-  modified: { letter: 'M', color: '#d29922' },
-  deleted: { letter: 'D', color: '#f85149' }
-}
-const ROW_INDENT_REM = 0.875
-
-function TreeRow({ depth, selected, onClick, children }) {
-  return jsx('div', {
-    className: 'flex cursor-pointer items-center gap-1.5 rounded py-0.5 pr-1 hover:bg-(--chrome-action-hover)',
-    style: { paddingLeft: `${0.25 + depth * ROW_INDENT_REM}rem`, background: selected ? 'color-mix(in srgb, var(--ui-accent) 16%, transparent)' : undefined },
-    onClick, children
-  })
-}
-
-function TreeNodes({ nodes, depth, repoName, selected, onSelect, collapsed, toggle, openCommentsByPath, forceOpen }) {
-  return nodes.flatMap(node => {
-    if (node.kind === 'dir') {
-      const isOpen = forceOpen || !collapsed.has(`${repoName}:${node.path}`)
-      return [
-        jsxs(TreeRow, { key: `d:${node.path}`, depth, onClick: () => toggle(`${repoName}:${node.path}`), children: [
-          jsx(Codicon, { name: isOpen ? 'chevron-down' : 'chevron-right', style: { color: 'var(--ui-text-tertiary)' } }),
-          jsx(Codicon, { name: isOpen ? 'folder-opened' : 'folder', style: { color: 'var(--ui-accent)' } }),
-          jsx('span', { className: 'min-w-0 flex-1 truncate', children: node.name }),
-          jsx('span', { style: { color: 'var(--ui-text-quaternary)' }, children: node.files })
-        ] }),
-        ...(isOpen ? [jsx(TreeNodes, { key: `c:${node.path}`, nodes: node.children, depth: depth + 1, repoName, selected, onSelect, collapsed, toggle, openCommentsByPath, forceOpen })] : [])
-      ]
-    }
-    const { file } = node
-    const mark = STATUS_MARK[file.status] ?? STATUS_MARK.modified
-    const isSelected = selected?.repo === repoName && selected?.path === file.path
-    const comments = openCommentsByPath[file.path] ?? 0
-    return [jsxs(TreeRow, { key: `f:${file.path}`, depth, selected: isSelected, onClick: () => onSelect({ repo: repoName, path: file.path }), children: [
-      jsx('span', { className: 'w-3.5 shrink-0' }),
-      jsx(Codicon, { name: 'file', style: { color: 'var(--ui-text-tertiary)' } }),
-      jsx('span', { className: 'min-w-0 flex-1 truncate', title: file.path, style: { fontWeight: isSelected ? 600 : 400, textDecoration: file.status === 'deleted' ? 'line-through' : undefined }, children: node.name }),
-      comments > 0 && jsxs('span', { className: 'flex items-center gap-0.5', style: { color: 'var(--ui-accent)' }, children: [jsx(Codicon, { name: 'comment' }), comments] }),
-      jsx('span', { style: { color: '#2ea043' }, children: `+${file.additions}` }),
-      jsx('span', { style: { color: '#f85149' }, children: `−${file.deletions}` }),
-      jsx('span', { className: 'w-3 shrink-0 text-center font-medium', style: { color: mark.color }, title: file.status, children: mark.letter })
-    ] })]
-  })
-}
-
-function RepoTree({ repo, comments, selected, onSelect, query }) {
-  const [collapsed, setCollapsed] = useState(() => new Set())
-  const [repoOpen, setRepoOpen] = useState(true)
-  const toggle = key => setCollapsed(previous => { const next = new Set(previous); next.has(key) ? next.delete(key) : next.add(key); return next })
-  const openCommentsByPath = {}
-  for (const comment of comments) {
-    if (comment.repo === repo.name && comment.path && comment.status === 'open') openCommentsByPath[comment.path] = (openCommentsByPath[comment.path] ?? 0) + 1
-  }
-  const visibleFiles = filterFiles(repo.files, query)
-  const filtering = query.trim() !== ''
-  if (filtering && visibleFiles.length === 0) return null
-
-  return jsxs('div', { className: 'mb-3', children: [
-    jsxs('div', { className: 'flex cursor-pointer items-center gap-1.5 py-1 font-medium', onClick: () => setRepoOpen(!repoOpen), children: [
-      jsx(Codicon, { name: repoOpen ? 'chevron-down' : 'chevron-right', style: { color: 'var(--ui-text-tertiary)' } }),
-      jsx(Codicon, { name: 'repo' }),
-      jsx('span', { className: 'min-w-0 truncate', children: repo.name }),
-      repo.uncommitted && jsx('span', { title: 'uncommitted changes', style: { color: UNMERGED_AMBER }, children: '●' }),
-      jsx('span', { className: 'ml-auto', children: jsx(MergeBadge, { state: repo.merge_state, unmergedCommits: repo.unmerged_commits, totalCommits: repo.commits.length }) })
-    ] }),
-    jsxs('div', { className: 'mb-1 pl-5', style: { color: 'var(--ui-text-tertiary)' }, children:
-      `${repo.branch} → ${repo.base_branch} · ${repo.files.length} files · +${repo.additions} −${repo.deletions}` }),
-    repoOpen && repo.commits.length > 0 && jsx(CommitList, { commits: repo.commits }),
-    repoOpen && jsx(TreeNodes, { nodes: buildFileTree(visibleFiles), depth: 0, repoName: repo.name, selected, onSelect, collapsed, toggle, openCommentsByPath, forceOpen: filtering })
-  ] })
-}
-
-function FileTree({ session, selected, onSelect }) {
-  const [query, setQuery] = useState('')
-  return jsxs('div', { children: [
-    jsx(Input, { value: query, placeholder: 'Filter files…', onChange: e => setQuery(e.target.value), className: 'mb-2' }),
-    ...session.repos.map(repo => jsx(RepoTree, { key: repo.name, repo, comments: session.comments, selected, onSelect, query })),
-    session.repos.length === 0 && jsx('div', { style: { color: 'var(--ui-text-tertiary)' }, children: 'No repositories in this session yet.' })
   ] })
 }
 
@@ -691,10 +461,9 @@ function DeletePanel({ session, onDeleted }) {
   ] })
 }
 
-/** `compact` is the docked pane: narrow, so files stack above the diff and the transcript is the chat itself. */
-function SessionDetail({ name, onGone, compact = false }) {
+/** One session's review: files stacked above the diff, sized for the docked pane. The chat itself sits beside it. */
+function SessionDetail({ name, onGone }) {
   const [selected, setSelected] = useState(null) // { repo, path }
-  const [showTranscript, setShowTranscript] = useState(true)
   const focusedStoredId = useValue(host.state.focusedStoredSessionId) // hooks stay above the early returns below
   const { data: session, error } = useQuery({
     queryKey: [ID, 'session', name], queryFn: () => ctx.rest(`/sessions/${name}`), refetchInterval: POLL_MS
@@ -704,8 +473,8 @@ function SessionDetail({ name, onGone, compact = false }) {
 
   const linked = session.hermes_sessions[0]
   const backendOutdated = session.merge_state === undefined
-  // In the docked pane the focused chat is already on screen beside it.
-  const alreadyOpenBesideMe = compact && focusedStoredId === linked?.id
+  // The focused chat is already on screen beside the pane.
+  const alreadyOpenBesideMe = focusedStoredId === linked?.id
   const selectedRepo = session.repos.find(r => r.name === selected?.repo)
   const selectedFile = selectedRepo?.files.find(f => f.path === selected?.path)
 
@@ -717,22 +486,16 @@ function SessionDetail({ name, onGone, compact = false }) {
       jsx('span', { style: { color: 'var(--ui-text-tertiary)' }, children: `${session.repos.length} repos · ${session.comments.filter(c => c.status === 'open').length} open comments` }),
       jsx(MergeBadge, { state: session.merge_state, unmergedCommits: session.unmerged_repos, totalCommits: 0 }),
       linked && !alreadyOpenBesideMe && jsx(Button, { variant: 'ghost', size: 'sm', onClick: () => host.openSession(linked.id, { intent: 'tab' }), children: 'Open session' }),
-      linked && !compact && jsx(Button, { variant: 'ghost', size: 'sm', onClick: () => setShowTranscript(!showTranscript), children: showTranscript ? 'Hide transcript' : 'Show transcript' }),
       jsx('div', { className: 'ml-auto', children: jsx(DeletePanel, { session, onDeleted: () => { refresh(); onGone() } }) })
     ] }),
-    jsxs('div', { className: compact ? 'flex min-h-0 flex-1 flex-col' : 'flex min-h-0 flex-1', children: [
-      jsx('div', { className: compact ? 'max-h-60 shrink-0 overflow-auto border-b p-2 text-xs' : 'w-72 shrink-0 overflow-auto border-r p-2 text-xs', style: { borderColor: 'var(--ui-stroke-secondary)' }, children:
+    jsxs('div', { className: 'flex min-h-0 flex-1 flex-col', children: [
+      jsx('div', { className: 'max-h-60 shrink-0 overflow-auto border-b p-2 text-xs', style: { borderColor: 'var(--ui-stroke-secondary)' }, children:
         jsx(FileTree, { session, selected, onSelect: setSelected })
       }),
       jsx('div', { className: 'min-w-0 flex-1 overflow-auto p-2', children:
         selectedFile
-          ? jsx(FileDiff, { session, repo: selectedRepo, file: selectedFile, compact, key: `${selected.repo}/${selected.path}` })
+          ? jsx(FileDiff, { session, repo: selectedRepo, file: selectedFile, key: `${selected.repo}/${selected.path}` })
           : jsx('div', { className: 'p-4 text-sm', style: { color: 'var(--ui-text-tertiary)' }, children: 'Pick a file. Click a line to comment; the comment is sent to the Hermes session.' })
-      }),
-      showTranscript && !compact && jsx('div', { className: 'w-96 shrink-0 border-l', style: { borderColor: 'var(--ui-stroke-secondary)' }, children:
-        linked
-          ? jsx(Transcript, { storedSessionId: linked.id, key: linked.id })
-          : jsx('div', { className: 'p-4 text-xs', style: { color: 'var(--ui-text-tertiary)' }, children: 'No Hermes session has this directory as its cwd yet.' })
       })
     ] })
   ] })
@@ -826,7 +589,7 @@ function useSessionList() {
 // --- docked pane next to the chat ----------------------------------------------------------
 
 /**
- * A compact copy of the page. It follows the focused chat: when that chat belongs to a review session
+ * The review pane. It follows the focused chat: when that chat belongs to a review session
  * (matched through the session's cwd) the pane shows it; the list lets you look at any other session.
  */
 function ReviewPane() {
@@ -857,30 +620,9 @@ function ReviewPane() {
     jsx('div', { className: 'min-h-0 flex-1 overflow-auto', children: creating
       ? jsx(NewSessionForm, { onCreated: choose, onCancel: () => setCreating(false) })
       : selectedName
-        ? jsx(SessionDetail, { name: selectedName, key: selectedName, compact: true, onGone: () => setChosenName(null) })
+        ? jsx(SessionDetail, { name: selectedName, key: selectedName, onGone: () => setChosenName(null) })
         : jsx('div', { className: 'p-4 text-xs', style: { color: 'var(--ui-text-tertiary)' },
             children: `The focused chat is not a review session (its cwd is not under ${root ?? 'the sessions root'}). Pick a session above or create one.` }) })
-  ] })
-}
-
-// --- page --------------------------------------------------------------------------------
-
-function ReviewPage() {
-  const [selectedName, setSelectedName] = useState(null)
-  const [creating, setCreating] = useState(false)
-  const { root, sessions } = useSessionList()
-
-  return jsxs('div', { className: 'flex h-full min-h-0', children: [
-    jsxs('div', { className: 'w-64 shrink-0 overflow-auto border-r p-2 text-sm', style: { borderColor: 'var(--ui-stroke-secondary)' }, children: [
-      jsx(Button, { size: 'sm', className: 'mb-2 w-full', onClick: () => { setCreating(true); setSelectedName(null) }, children: 'New review session' }),
-      jsx('div', { className: 'mb-2 text-xs', style: { color: 'var(--ui-text-tertiary)' }, children: root ?? '' }),
-      jsx(SessionRows, { sessions, selectedName, onSelect: name => { setCreating(false); setSelectedName(name) } })
-    ] }),
-    jsx('div', { className: 'min-w-0 flex-1', children: creating
-      ? jsx(NewSessionForm, { onCreated: name => { setCreating(false); setSelectedName(name) }, onCancel: () => setCreating(false) })
-      : selectedName
-      ? jsx(SessionDetail, { name: selectedName, key: selectedName, onGone: () => setSelectedName(null) })
-      : jsx('div', { className: 'p-4 text-sm', children: 'Select a session.' }) })
   ] })
 }
 
@@ -893,12 +635,10 @@ export default {
     ctx = pluginContext
     ctx.onEvent('message.complete', () => refresh())
     ctx.onEvent('message.complete', event => postFinalReplyToThread(event).catch(error => host.notifyError(error, 'Could not post the agent reply')))
-    ctx.register({ id: 'page', area: ROUTES_AREA, data: { path: '/session-review' }, render: () => jsx(ReviewPage, {}) })
     ctx.register({
       id: 'pane', area: PANES_AREA, title: 'Review',
       data: { placement: 'right', dock: { pane: 'workspace', pos: 'right' }, width: '520px' },
       render: () => jsx(ReviewPane, {})
     })
-    ctx.register({ id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: '/session-review', label: 'Session Review', codicon: 'git-pull-request' } })
   }
 }

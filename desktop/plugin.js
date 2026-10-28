@@ -5,7 +5,7 @@
 import {
   Badge, Button, Input, Textarea, ROUTES_AREA, SIDEBAR_NAV_AREA, host, queryClient, useQuery
 } from '@hermes/plugin-sdk'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'session-review'
@@ -208,6 +208,77 @@ function FileDiff({ session, repo, file }) {
   ] })
 }
 
+// --- session transcript --------------------------------------------------------------------
+
+/** Split text on ``` fences so code renders monospaced; everything else keeps its line breaks. */
+function MessageText({ text }) {
+  return jsx('div', { className: 'whitespace-pre-wrap break-words', children: text.split(/(```[\s\S]*?```)/g).map((part, index) =>
+    part.startsWith('```')
+      ? jsx('pre', { key: index, className: 'my-1 overflow-auto rounded p-2 font-mono text-[0.6875rem]', style: { background: 'var(--ui-stroke-secondary)' }, children: part.replace(/^```\w*\n?|```$/g, '') })
+      : jsx('span', { key: index, children: part })
+  ) })
+}
+
+function TranscriptRow({ message }) {
+  const text = (message.text ?? (typeof message.content === 'string' ? message.content : '') ?? '').trim()
+  if (message.role === 'tool') {
+    const label = [message.name, message.context].filter(Boolean).join(' ')
+    return label ? jsx('div', { className: 'truncate text-[0.6875rem]', style: { ...SELECTABLE, color: 'var(--ui-text-quaternary)' }, children: `▸ ${label}` }) : null
+  }
+  if (!text) return null
+  const isUser = message.role === 'user'
+  return jsxs('div', { className: 'rounded p-2', style: { ...SELECTABLE, background: isUser ? 'var(--ui-stroke-secondary)' : undefined }, children: [
+    jsx('div', { className: 'mb-0.5 text-[0.6875rem] font-medium', style: { color: 'var(--ui-text-tertiary)' }, children: isUser ? 'You' : 'Agent' }),
+    jsx(MessageText, { text })
+  ] })
+}
+
+function Transcript({ storedSessionId }) {
+  const [draft, setDraft] = useState('')
+  const scroller = useRef(null)
+  const { data } = useQuery({
+    queryKey: [ID, 'transcript', storedSessionId],
+    queryFn: async () => {
+      // Resuming reuses the live session; history needs its runtime id.
+      const resumed = await host.request('session.resume', { session_id: storedSessionId, lazy: true })
+      return host.request('session.history', { session_id: resumed.session_id })
+    },
+    refetchInterval: POLL_MS
+  })
+  const messages = data?.messages ?? []
+
+  // Follow new messages only when the reader is already at the bottom.
+  useEffect(() => {
+    const element = scroller.current
+    if (element && element.scrollHeight - element.scrollTop - element.clientHeight < 120) element.scrollTop = element.scrollHeight
+  }, [messages.length])
+
+  const send = async () => {
+    const text = draft.trim()
+    if (!text) return
+    setDraft('')
+    try {
+      await sendToHermesSession(storedSessionId, text)
+      refresh()
+    } catch (error) {
+      setDraft(text)
+      host.notifyError(error, 'Could not send the message')
+    }
+  }
+
+  return jsxs('div', { className: 'flex h-full min-h-0 flex-col text-xs', children: [
+    jsx('div', { ref: scroller, className: 'flex min-h-0 flex-1 flex-col gap-1 overflow-auto p-2', children: messages.map((message, index) => jsx(TranscriptRow, { key: message.row_id ?? index, message })) }),
+    jsxs('div', { className: 'flex gap-2 border-t p-2', style: { borderColor: 'var(--ui-stroke-secondary)' }, children: [
+      jsx(Textarea, {
+        rows: 2, value: draft, placeholder: 'Message the session…  (Enter sends, Shift+Enter newline)',
+        onChange: e => setDraft(e.target.value),
+        onKeyDown: e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }
+      }),
+      jsx(Button, { size: 'sm', disabled: !draft.trim(), onClick: send, children: 'Send' })
+    ] })
+  ] })
+}
+
 // --- session detail ----------------------------------------------------------------------
 
 function MergePanel({ session, onMerged }) {
@@ -238,6 +309,7 @@ function MergePanel({ session, onMerged }) {
 
 function SessionDetail({ name, onGone }) {
   const [selected, setSelected] = useState(null) // { repo, path }
+  const [showTranscript, setShowTranscript] = useState(true)
   const { data: session, error } = useQuery({
     queryKey: [ID, 'session', name], queryFn: () => ctx.rest(`/sessions/${name}`), refetchInterval: POLL_MS
   })
@@ -252,7 +324,8 @@ function SessionDetail({ name, onGone }) {
     jsxs('div', { className: 'flex items-center gap-3 border-b p-3 text-sm', style: { borderColor: 'var(--ui-stroke-secondary)' }, children: [
       jsx('b', { children: linked?.title || session.name }),
       jsx('span', { style: { color: 'var(--ui-text-tertiary)' }, children: `${session.repos.length} repos · ${session.comments.filter(c => c.status === 'open').length} open comments` }),
-      linked && jsx(Button, { variant: 'ghost', size: 'sm', onClick: () => host.openSession(linked.id), children: 'Open session' }),
+      linked && jsx(Button, { variant: 'ghost', size: 'sm', onClick: () => host.openSession(linked.id, { intent: 'tab' }), children: 'Open session' }),
+      linked && jsx(Button, { variant: 'ghost', size: 'sm', onClick: () => setShowTranscript(!showTranscript), children: showTranscript ? 'Hide transcript' : 'Show transcript' }),
       jsx('div', { className: 'ml-auto', children: jsx(MergePanel, { session, onMerged: () => { refresh(); onGone() } }) })
     ] }),
     jsxs('div', { className: 'flex min-h-0 flex-1', children: [
@@ -275,6 +348,11 @@ function SessionDetail({ name, onGone }) {
         selectedFile
           ? jsx(FileDiff, { session, repo: selectedRepo, file: selectedFile, key: `${selected.repo}/${selected.path}` })
           : jsx('div', { className: 'p-4 text-sm', style: { color: 'var(--ui-text-tertiary)' }, children: 'Pick a file. Click a line to comment; the comment is sent to the Hermes session.' })
+      }),
+      showTranscript && jsx('div', { className: 'w-96 shrink-0 border-l', style: { borderColor: 'var(--ui-stroke-secondary)' }, children:
+        linked
+          ? jsx(Transcript, { storedSessionId: linked.id, key: linked.id })
+          : jsx('div', { className: 'p-4 text-xs', style: { color: 'var(--ui-text-tertiary)' }, children: 'No Hermes session has this directory as its cwd yet.' })
       })
     ] })
   ] })
@@ -383,6 +461,7 @@ export default {
   name: 'Session Review',
   register(pluginContext) {
     ctx = pluginContext
+    ctx.onEvent('message.complete', () => refresh())
     ctx.onEvent('message.complete', event => postFinalReplyToThread(event).catch(error => host.notifyError(error, 'Could not post the agent reply')))
     ctx.register({ id: 'page', area: ROUTES_AREA, data: { path: '/session-review' }, render: () => jsx(ReviewPage, {}) })
     ctx.register({ id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: '/session-review', label: 'Session Review', codicon: 'git-pull-request' } })

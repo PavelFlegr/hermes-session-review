@@ -1,0 +1,8 @@
+name: session-review
+label: Session Review
+version: 0.1.0
+description: >
+  Merge-request style review of Hermes sessions. A session is a directory under
+  the sessions root; every child git worktree is an affected repo. The desktop
+  page shows a multi-repo diff, collects review comments and feeds them back
+  into the session.

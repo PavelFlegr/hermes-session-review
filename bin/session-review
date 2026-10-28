@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""Agent-side helper: create session worktrees, read and answer review comments."""
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import review_core as core  # noqa: E402
+
+
+def add_repo(args):
+    source = Path(args.source_repo).resolve()
+    session = core.sessions_root() / args.session
+    session.mkdir(parents=True, exist_ok=True)
+    target = session / source.name
+    core.git(source, "worktree", "add", "-b", f"hermes/{args.session}", str(target))
+    print(target)
+
+
+def comments(args):
+    session = core.session_dir(args.session)
+    for comment in core.load_comments(session):
+        if args.all or comment["status"] == "open":
+            print(core.format_comment_for_agent(comment), end="\n\n")
+
+
+def reply(args):
+    session = core.session_dir(args.session or Path.cwd().relative_to(core.sessions_root()).parts[0])
+    core.reply_to_comment(session, args.comment_id, args.body, resolve=args.resolve)
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="session-review")
+    sub = parser.add_subparsers(required=True)
+
+    p = sub.add_parser("add-repo", help="create a session worktree of a repo")
+    p.add_argument("session"); p.add_argument("source_repo"); p.set_defaults(run=add_repo)
+
+    p = sub.add_parser("comments", help="print open review comments")
+    p.add_argument("session"); p.add_argument("--all", action="store_true"); p.set_defaults(run=comments)
+
+    p = sub.add_parser("reply", help="answer a review comment (session inferred from the cwd)")
+    p.add_argument("comment_id"); p.add_argument("body")
+    p.add_argument("--resolve", action="store_true"); p.add_argument("--session"); p.set_defaults(run=reply)
+
+    args = parser.parse_args()
+    try:
+        args.run(args)
+    except core.ReviewError as error:
+        sys.exit(f"error: {error}")
+
+
+main()

@@ -402,11 +402,17 @@ def linked_hermes_sessions(session: Path, state_db: Path | None = None) -> list[
     state_db = state_db or Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")) / "state.db"
     if not state_db.exists():
         return []
+    # Windows stores cwd with backslashes and compares paths case-insensitively; normalise both sides there.
+    if os.name == "nt":
+        column, target = "lower(REPLACE(cwd, char(92), '/'))", session.as_posix().lower()
+    else:
+        column, target = "cwd", str(session)
     connection = sqlite3.connect(f"{state_db.resolve().as_uri()}?mode=ro", uri=True)
     try:
         rows = connection.execute(
             "SELECT id, title, last_activity_at, message_count, ended_at FROM sessions "
-            "WHERE cwd = ?1 OR cwd LIKE ?1 || '/%' ORDER BY last_activity_at DESC", (str(session),)
+            f"WHERE {column} = ?1 OR substr({column}, 1, length(?1) + 1) = ?1 || '/' "
+            "ORDER BY last_activity_at DESC", (target,)
         ).fetchall()
     finally:
         connection.close()

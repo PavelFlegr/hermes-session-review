@@ -1,4 +1,4 @@
-// Tests the pure diff-rendering functions of desktop/plugin.js by loading the file with the
+// Tests the pure diff-rendering and file-tree functions of desktop/plugin.js by loading the file with the
 // SDK imports stubbed out (the plugin itself can only import the SDK in the real app).
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -6,7 +6,7 @@ import test from 'node:test'
 
 const source = readFileSync(new URL('../desktop/plugin.js', import.meta.url), 'utf8')
   .replace(/^import[\s\S]*?from '[^']+'\n/gm, '')
-const stubs = 'const host={},queryClient={},useQuery=()=>{},useValue=()=>{},useState=()=>{},useEffect=()=>{},useRef=()=>{},jsx=()=>{},jsxs=()=>{},Badge=0,Button=0,Input=0,Textarea=0,PANES_AREA=0,ROUTES_AREA=0,SIDEBAR_NAV_AREA=0;'
+const stubs = 'const host={},queryClient={},useQuery=()=>{},useValue=()=>{},useState=()=>{},useEffect=()=>{},useRef=()=>{},jsx=()=>{},jsxs=()=>{},Badge=0,Button=0,Codicon=0,Input=0,Textarea=0,PANES_AREA=0,ROUTES_AREA=0,SIDEBAR_NAV_AREA=0;'
 const url = 'data:text/javascript;base64,' + Buffer.from(stubs + source).toString('base64')
 const plugin = await import(url)
 
@@ -51,4 +51,34 @@ test('split rows pair removals with additions and keep context on both sides', (
   assert.equal(split.length, 4)
   assert.deepEqual([split[2].left.code, split[2].right.code], ['b', 'B'])
   assert.deepEqual([split[3].left.code, split[3].right.code], ['c', 'new'])
+})
+
+const file = (path, additions = 1, deletions = 0, status = 'modified') => ({ path, additions, deletions, status })
+
+test('file tree nests folders, sorts folders first and sums folder stats', () => {
+  const tree = plugin.buildFileTree([file('README.md'), file('src/b.py', 3, 1), file('src/a.py', 2, 0), file('docs/x.md')])
+  assert.deepEqual(tree.map(n => n.name), ['docs', 'src', 'README.md'])
+  const src = tree.find(n => n.name === 'src')
+  assert.deepEqual([src.files, src.additions, src.deletions], [2, 5, 1])
+  assert.deepEqual(src.children.map(n => n.name), ['a.py', 'b.py'])
+})
+
+test('single-child folder chains are merged into one row', () => {
+  const tree = plugin.buildFileTree([file('a/b/c/one.py'), file('a/b/c/two.py')])
+  assert.equal(tree.length, 1)
+  assert.equal(tree[0].name, 'a/b/c')
+  assert.equal(tree[0].path, 'a/b/c')
+  assert.equal(tree[0].children.length, 2)
+})
+
+test('a folder with a file and a subfolder is not merged', () => {
+  const tree = plugin.buildFileTree([file('a/top.py'), file('a/b/deep.py')])
+  assert.equal(tree[0].name, 'a')
+  assert.deepEqual(tree[0].children.map(n => n.name), ['b', 'top.py'])
+})
+
+test('filter matches paths case-insensitively', () => {
+  const files = [file('src/App.py'), file('docs/guide.md')]
+  assert.deepEqual(plugin.filterFiles(files, 'app').map(f => f.path), ['src/App.py'])
+  assert.equal(plugin.filterFiles(files, '  ').length, 2)
 })

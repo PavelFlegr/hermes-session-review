@@ -46,6 +46,16 @@ Then:
 
 Config keys go in `$HERMES_HOME/plugin-data/session-review/config.json`. The environment variable wins.
 
+## Windows
+
+The Python core, the helper script and the test suites run on Windows 11 (checked in a VM with git 2.5x, Node 22 and
+Python 3.15 from `uv`). The Hermes desktop UI itself was not run on Windows from this repo.
+
+- Agents run the helper as `"<python>" "<script>" add-repo …`; in PowerShell prefix that with `&`. The New form
+  puts the exact command into the first message.
+- Deleting a session fails while a terminal or editor still has a directory inside it open (Windows will not
+  remove an in-use directory). Close those, then delete again.
+
 ## Limits
 
 - Syntax highlighting is line-based; a block comment or string opened on an earlier line is not recognised.
@@ -60,7 +70,7 @@ Config keys go in `$HERMES_HOME/plugin-data/session-review/config.json`. The env
 ```bash
 uv run --no-project --with pytest python -m pytest -q tests      # core logic
 node --test tests/plugin-logic.test.mjs                          # diff, tree and badge logic
-ln -s "$PWD" ~/.hermes/plugins/session-review                    # live-develop; JS hot-reloads
+ln -s "$PWD" ~/.hermes/plugins/session-review                    # live-develop; JS hot-reloads (Windows: mklink /J)
 ```
 
 The Python backend (`dashboard/plugin_api.py`) is imported once by the gateway, so route changes need a gateway restart.

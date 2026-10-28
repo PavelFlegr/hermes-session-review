@@ -74,36 +74,35 @@ def test_comment_thread_lifecycle(workspace):
         core.reply_to_comment(session, "nope", "x")
 
 
-def test_merge_removes_session_and_lands_commits(workspace):
+def branches(repo: Path) -> str:
+    return subprocess.run(["git", "-C", str(repo), "branch"], capture_output=True, text=True).stdout
+
+
+def test_delete_keeps_branch_with_unmerged_commits(workspace):
     source, session, worktree = workspace
     (worktree / "a.txt").write_text("one\ntwo\nthree\n")
-    run(worktree, "git", "commit", "-qam", "add three")
-    core.add_comment(session, repo="source", path=None, line=None, commit=None, body="ok")
-    dry_log = core.merge_and_remove(session, dry_run=True)
-    assert session.exists() and "merge hermes/fix-bug into main" in dry_log[0]
-    core.merge_and_remove(session)
+    run(worktree, "git", "commit", "-qam", "unmerged work")
+    core.add_comment(session, repo="source", path=None, line=None, commit=None, body="x")
+    preview = core.delete_session(session, dry_run=True)
+    assert session.exists() and any("keep branch hermes/fix-bug" in line for line in preview)
+    core.delete_session(session)
     assert not session.exists()
-    assert (source / "a.txt").read_text() == "one\ntwo\nthree\n"
-    assert "hermes/fix-bug" not in subprocess.run(["git", "-C", str(source), "branch"], capture_output=True, text=True).stdout
+    assert "hermes/fix-bug" in branches(source)  # the commits are still reachable
+    assert (source / "a.txt").read_text() == "one\ntwo\n"  # nothing was merged
 
 
-def test_merge_refuses_uncommitted_worktree(workspace):
+def test_delete_drops_branch_already_in_base(workspace):
+    source, session, _ = workspace  # no new commits: branch is fully contained in main
+    core.delete_session(session)
+    assert not session.exists() and "hermes/fix-bug" not in branches(source)
+
+
+def test_delete_discards_uncommitted_changes_and_says_so(workspace):
     _, session, worktree = workspace
     (worktree / "a.txt").write_text("dirty\n")
-    with pytest.raises(core.ReviewError, match="uncommitted"):
-        core.merge_and_remove(session)
-    assert session.exists()
-
-
-def test_merge_conflict_aborts_and_keeps_session(workspace):
-    source, session, worktree = workspace
-    (worktree / "a.txt").write_text("session\ntwo\n")
-    run(worktree, "git", "commit", "-qam", "session edit")
-    (source / "a.txt").write_text("main\ntwo\n")
-    run(source, "git", "commit", "-qam", "main edit")
-    with pytest.raises(core.ReviewError, match="failed"):
-        core.merge_and_remove(session)
-    assert session.exists() and not core.has_uncommitted_changes(source)
+    assert any("uncommitted changes will be discarded" in line for line in core.delete_session(session, dry_run=True))
+    core.delete_session(session)
+    assert not session.exists()
 
 
 def test_create_session_makes_one_worktree_per_repo(workspace, tmp_path, monkeypatch):

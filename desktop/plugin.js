@@ -10,8 +10,6 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'session-review'
 const POLL_MS = 5000
-const ADDED_TINT = 'color-mix(in srgb, #2ea043 18%, transparent)'
-const REMOVED_TINT = 'color-mix(in srgb, #f85149 18%, transparent)'
 
 // The app shell disables text selection; review content must be selectable and copyable.
 const SELECTABLE = { userSelect: 'text', cursor: 'text' }
@@ -92,11 +90,11 @@ function parsePatch(patch) {
     } else if (!inHunk) {
       continue
     } else if (text.startsWith('+')) {
-      rows.push({ kind: 'add', text, newLine: newLine++ })
+      rows.push({ kind: 'add', text, code: text.slice(1), newLine: newLine++ })
     } else if (text.startsWith('-')) {
-      rows.push({ kind: 'del', text, oldLine: oldLine++ })
+      rows.push({ kind: 'del', text, code: text.slice(1), oldLine: oldLine++ })
     } else if (text.startsWith(' ')) {
-      rows.push({ kind: 'ctx', text, oldLine: oldLine++, newLine: newLine++ })
+      rows.push({ kind: 'ctx', text, code: text.slice(1), oldLine: oldLine++, newLine: newLine++ })
     }
   }
   return rows
@@ -161,50 +159,275 @@ function NewCommentBox({ sessionName, session, repo, path, line, headCommit, onD
   ] })
 }
 
-// --- diff view -------------------------------------------------------------------------
+// --- syntax highlighting -----------------------------------------------------------------------
+// The plugin may import nothing but the SDK, so highlighting is a small hand-rolled tokenizer:
+// one ordered rule list per language, applied line by line (multi-line strings and block
+// comments that start on an earlier line are therefore not recognised).
 
-function FileDiff({ session, repo, file }) {
+const C_STYLE_KEYWORDS = 'if else for while do switch case break continue return goto default struct union enum typedef static const volatile extern sizeof void int char float double long short unsigned signed bool true false null nullptr class public private protected virtual override template typename namespace using new delete try catch throw this auto fn let mut pub impl trait use mod match loop in as ref self Self move async await dyn where type func package import interface map chan go defer range var final abstract extends implements instanceof'
+const LANGUAGE_KEYWORDS = {
+  python: 'and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield True False None self cls',
+  script: 'async await break case catch class const continue debugger default delete do else enum export extends false finally for from function if implements import in instanceof interface let new null of private protected public readonly return static super switch this throw true try type typeof undefined var void while with yield as',
+  cStyle: C_STYLE_KEYWORDS,
+  shell: 'if then else elif fi for while do done case esac function in return exit local export readonly set unset echo cd source',
+  literal: 'true false null'
+}
+
+const wordList = words => new RegExp(`^(?:${words.split(' ').join('|')})\\b`)
+const STRING = /^(?:[rRbBfFuU]{0,2}"(?:[^"\\]|\\.)*"|[rRbBfFuU]{0,2}'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/
+const NUMBER = /^(?:0[xX][\da-fA-F_]+|\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?)\b/
+const IDENTIFIER_BEFORE_PAREN = /^[A-Za-z_]\w*(?=\()/
+const CAPITALIZED = /^[A-Z][A-Za-z0-9_]*/
+
+const languageRules = {
+  python: [['comment', /^#.*/], ['string', STRING], ['keyword', wordList(LANGUAGE_KEYWORDS.python)], ['number', NUMBER], ['function', IDENTIFIER_BEFORE_PAREN], ['type', CAPITALIZED]],
+  script: [['comment', /^(?:\/\/.*|\/\*.*?\*\/)/], ['string', STRING], ['keyword', wordList(LANGUAGE_KEYWORDS.script)], ['number', NUMBER], ['function', IDENTIFIER_BEFORE_PAREN], ['type', CAPITALIZED]],
+  cStyle: [['comment', /^(?:\/\/.*|\/\*.*?\*\/|#\s*(?:include|define|if|ifdef|ifndef|endif|else|pragma).*)/], ['string', STRING], ['keyword', wordList(LANGUAGE_KEYWORDS.cStyle)], ['number', NUMBER], ['function', IDENTIFIER_BEFORE_PAREN], ['type', CAPITALIZED]],
+  shell: [['comment', /^#.*/], ['string', STRING], ['keyword', wordList(LANGUAGE_KEYWORDS.shell)], ['property', /^\$\{?\w+\}?/], ['number', NUMBER]],
+  json: [['property', /^"(?:[^"\\]|\\.)*"(?=\s*:)/], ['string', STRING], ['keyword', wordList(LANGUAGE_KEYWORDS.literal)], ['number', NUMBER]],
+  config: [['comment', /^#.*/], ['property', /^[\w.-]+(?=\s*[:=])/], ['string', STRING], ['keyword', wordList(LANGUAGE_KEYWORDS.literal + ' yes no')], ['number', NUMBER]],
+  markdown: [['keyword', /^#{1,6}\s.*/], ['string', /^`[^`]*`/], ['property', /^\*\*[^*]+\*\*/]],
+  markup: [['comment', /^<!--.*?-->/], ['keyword', /^<\/?[\w:-]+/], ['property', /^[\w:-]+(?==)/], ['string', STRING]],
+  stylesheet: [['comment', /^\/\*.*?\*\//], ['property', /^[\w-]+(?=\s*:)/], ['string', STRING], ['number', /^#?\d[\w.%]*/], ['type', /^[.#][\w-]+/]]
+}
+
+const EXTENSION_LANGUAGE = {
+  py: 'python', js: 'script', mjs: 'script', cjs: 'script', jsx: 'script', ts: 'script', tsx: 'script',
+  c: 'cStyle', h: 'cStyle', cc: 'cStyle', cpp: 'cStyle', hpp: 'cStyle', go: 'cStyle', rs: 'cStyle', java: 'cStyle', d: 'cStyle', odin: 'cStyle', cs: 'cStyle', kt: 'cStyle', swift: 'cStyle', glsl: 'cStyle', hlsl: 'cStyle',
+  sh: 'shell', bash: 'shell', zsh: 'shell', json: 'json', yaml: 'config', yml: 'config', toml: 'config', ini: 'config', cfg: 'config', env: 'config',
+  md: 'markdown', html: 'markup', xml: 'markup', svg: 'markup', css: 'stylesheet', scss: 'stylesheet'
+}
+
+export function languageForPath(path) {
+  const extension = path.includes('.') ? path.split('.').pop().toLowerCase() : ''
+  return EXTENSION_LANGUAGE[extension] ?? null
+}
+
+/** Tokenise one line into [{ text, kind }]; `kind` is null for plain text. */
+export function highlightLine(line, language) {
+  const rules = languageRules[language]
+  if (!rules) return [{ text: line, kind: null }]
+  const tokens = []
+  let plainStart = 0
+  let position = 0
+  const flushPlain = end => { if (end > plainStart) tokens.push({ text: line.slice(plainStart, end), kind: null }) }
+  while (position < line.length) {
+    const rest = line.slice(position)
+    let matched = null
+    // A keyword must not start in the middle of a word (e.g. the "in" of "print").
+    if (position === 0 || !/\w/.test(line[position - 1])) {
+      for (const [kind, pattern] of rules) {
+        const result = pattern.exec(rest)
+        if (result && result[0].length > 0) { matched = { kind, text: result[0] }; break }
+      }
+    }
+    if (matched) {
+      flushPlain(position)
+      tokens.push(matched)
+      position += matched.text.length
+      plainStart = position
+    } else {
+      position += 1
+    }
+  }
+  flushPlain(line.length)
+  return tokens
+}
+
+// Mixing with currentColor keeps each hue readable on both light and dark themes.
+const TOKEN_HUE = { keyword: 320, string: 150, number: 60, type: 230, function: 255, property: 200 }
+export function tokenStyle(kind) {
+  if (!kind) return undefined
+  if (kind === 'comment') return { color: 'var(--ui-text-quaternary)', fontStyle: 'italic' }
+  return { color: `color-mix(in oklch, oklch(0.72 0.15 ${TOKEN_HUE[kind]}), currentColor 30%)` }
+}
+
+// --- intra-line (word-level) change marking ----------------------------------------------------
+
+/**
+ * Character range that differs between a removed and an added line: everything between their common
+ * prefix and common suffix. Returns null when the lines share too little for marking to help.
+ */
+export function changedRanges(oldText, newText) {
+  let prefix = 0
+  const shortest = Math.min(oldText.length, newText.length)
+  while (prefix < shortest && oldText[prefix] === newText[prefix]) prefix++
+  let suffix = 0
+  while (suffix < shortest - prefix && oldText[oldText.length - 1 - suffix] === newText[newText.length - 1 - suffix]) suffix++
+  if (prefix + suffix < shortest * 0.25) return null
+  return { old: [prefix, oldText.length - suffix], new: [prefix, newText.length - suffix] }
+}
+
+/** Cut tokens at the emphasis range so each segment is either wholly inside it or wholly outside. */
+export function applyEmphasis(tokens, range) {
+  if (!range || range[0] >= range[1]) return tokens.map(t => ({ ...t, emphasized: false }))
+  const segments = []
+  let offset = 0
+  for (const token of tokens) {
+    const end = offset + token.text.length
+    const cuts = [offset, Math.max(offset, Math.min(end, range[0])), Math.max(offset, Math.min(end, range[1])), end]
+    for (let i = 0; i < 3; i++) {
+      const text = token.text.slice(cuts[i] - offset, cuts[i + 1] - offset)
+      if (text) segments.push({ text, kind: token.kind, emphasized: i === 1 })
+    }
+    offset = end
+  }
+  return segments
+}
+
+/**
+ * Attach intra-line ranges to each removed line that is directly followed by an added line:
+ * the k-th removal pairs with the k-th addition of the same change block.
+ */
+export function markChangedWords(rows) {
+  const marked = rows.map(row => ({ ...row }))
+  for (let i = 0; i < marked.length; i++) {
+    if (marked[i].kind !== 'del') continue
+    const deletions = []
+    while (marked[i]?.kind === 'del') deletions.push(marked[i++])
+    const additions = []
+    while (marked[i]?.kind === 'add') additions.push(marked[i++])
+    i--
+    deletions.slice(0, additions.length).forEach((deletion, k) => {
+      const ranges = changedRanges(deletion.code, additions[k].code)
+      if (ranges) { deletion.emphasis = ranges.old; additions[k].emphasis = ranges.new }
+    })
+  }
+  return marked
+}
+
+/** Side-by-side layout: context rows on both sides, removals beside the additions that replace them. */
+export function toSplitRows(rows) {
+  const split = []
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]
+    if (row.kind === 'hunk') { split.push({ hunk: row }); continue }
+    if (row.kind === 'ctx') { split.push({ left: row, right: row }); continue }
+    const deletions = []
+    while (rows[i]?.kind === 'del') deletions.push(rows[i++])
+    const additions = []
+    while (rows[i]?.kind === 'add') additions.push(rows[i++])
+    i--
+    for (let k = 0; k < Math.max(deletions.length, additions.length); k++) {
+      split.push({ left: deletions[k] ?? null, right: additions[k] ?? null })
+    }
+  }
+  return split
+}
+
+// --- diff view ---------------------------------------------------------------------------------
+
+const ADDED_LINE = 'color-mix(in srgb, #2ea043 13%, transparent)'
+const ADDED_GUTTER = 'color-mix(in srgb, #2ea043 24%, transparent)'
+const ADDED_WORD = 'color-mix(in srgb, #2ea043 38%, transparent)'
+const REMOVED_LINE = 'color-mix(in srgb, #f85149 13%, transparent)'
+const REMOVED_GUTTER = 'color-mix(in srgb, #f85149 24%, transparent)'
+const REMOVED_WORD = 'color-mix(in srgb, #f85149 38%, transparent)'
+const HUNK_BAR = 'color-mix(in srgb, var(--ui-accent) 12%, transparent)'
+const DIFF_FONT = { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '0.75rem', lineHeight: '1.4', tabSize: 4 }
+const DIFF_MODE_KEY = 'session-review.diffMode'
+
+function CodeText({ row, language }) {
+  const wordColor = row.kind === 'add' ? ADDED_WORD : REMOVED_WORD
+  return jsx('span', { children: applyEmphasis(highlightLine(row.code, language), row.emphasis).map((segment, index) =>
+    jsx('span', { key: index, style: { ...tokenStyle(segment.kind), background: segment.emphasized ? wordColor : undefined, borderRadius: segment.emphasized ? 2 : undefined }, children: segment.text })) })
+}
+
+function Gutter({ number, tint, width = '3.25rem' }) {
+  return jsx('span', { className: 'shrink-0 px-2 text-right', style: { width, userSelect: 'none', color: 'var(--ui-text-quaternary)', background: tint }, children: number ?? '' })
+}
+
+const lineTint = kind => kind === 'add' ? ADDED_LINE : kind === 'del' ? REMOVED_LINE : undefined
+const gutterTint = kind => kind === 'add' ? ADDED_GUTTER : kind === 'del' ? REMOVED_GUTTER : undefined
+const SIGN = { add: '+', del: '−', ctx: ' ' }
+
+function UnifiedRow({ row, language, onSelect }) {
+  return jsxs('div', {
+    className: 'flex', style: { ...SELECTABLE, background: lineTint(row.kind), minWidth: 'max-content' },
+    onClick: onSelect,
+    children: [
+      jsx(Gutter, { number: row.oldLine, tint: gutterTint(row.kind) }),
+      jsx(Gutter, { number: row.newLine, tint: gutterTint(row.kind) }),
+      jsx('span', { className: 'w-5 shrink-0 text-center', style: { userSelect: 'none', color: 'var(--ui-text-tertiary)' }, children: SIGN[row.kind] }),
+      jsx('span', { className: 'whitespace-pre pr-4', children: jsx(CodeText, { row, language }) })
+    ]
+  })
+}
+
+function SplitCell({ row, language, onSelect }) {
+  const kind = row?.kind
+  return jsxs('div', {
+    className: 'flex min-w-0 flex-1', style: { ...SELECTABLE, background: row ? lineTint(kind) : 'color-mix(in srgb, currentColor 4%, transparent)' },
+    onClick: row?.newLine !== undefined ? onSelect : undefined,
+    children: [
+      jsx(Gutter, { number: kind === 'add' ? row.newLine : row?.oldLine, tint: gutterTint(kind), width: '2.75rem' }),
+      jsx('span', { className: 'overflow-hidden whitespace-pre pl-1 pr-2', children: row ? jsx(CodeText, { row, language }) : '' })
+    ]
+  })
+}
+
+function HunkBar({ text }) {
+  const [, label] = /^@@ [^@]* @@ ?(.*)$/.exec(text) ?? []
+  return jsx('div', { className: 'flex px-3 py-0.5', style: { background: HUNK_BAR, color: 'var(--ui-text-tertiary)', minWidth: 'max-content', userSelect: 'none' }, children: label ? `${text.split('@@')[1].trim()}   ${label}` : text.split('@@')[1]?.trim() ?? text })
+}
+
+function FileHeader({ file, mode, onMode, compact }) {
+  const slash = file.path.lastIndexOf('/')
+  return jsxs('div', { className: 'sticky top-0 z-10 flex items-center gap-2 border-b px-3 py-1.5 text-xs', style: { background: 'var(--ui-surface, var(--background))', borderColor: 'var(--ui-stroke-secondary)' }, children: [
+    jsxs('span', { className: 'min-w-0 truncate', style: SELECTABLE, children: [
+      slash >= 0 && jsx('span', { style: { color: 'var(--ui-text-tertiary)' }, children: file.path.slice(0, slash + 1) }),
+      jsx('b', { children: file.path.slice(slash + 1) })
+    ] }),
+    jsx(Badge, { children: file.status }),
+    jsx('span', { style: { color: '#2ea043' }, children: `+${file.additions}` }),
+    jsx('span', { style: { color: '#f85149' }, children: `−${file.deletions}` }),
+    !compact && jsxs('span', { className: 'ml-auto flex gap-1', children: [
+      jsx(Button, { size: 'sm', variant: mode === 'unified' ? undefined : 'ghost', onClick: () => onMode('unified'), children: 'Unified' }),
+      jsx(Button, { size: 'sm', variant: mode === 'split' ? undefined : 'ghost', onClick: () => onMode('split'), children: 'Split' })
+    ] })
+  ] })
+}
+
+function FileDiff({ session, repo, file, compact }) {
   const [commentLine, setCommentLine] = useState(null)
+  const [storedMode, setStoredMode] = useState(() => window.localStorage.getItem(DIFF_MODE_KEY) ?? 'unified')
+  const mode = compact ? 'unified' : storedMode
+  const chooseMode = next => { window.localStorage.setItem(DIFF_MODE_KEY, next); setStoredMode(next) }
+
   const { data } = useQuery({
     queryKey: [ID, 'patch', session.name, repo.name, file.path, repo.head],
     queryFn: () => ctx.rest(`/sessions/${session.name}/patch?repo=${encodeURIComponent(repo.name)}&path=${encodeURIComponent(file.path)}`)
   })
+  const language = languageForPath(file.path)
+  const rows = markChangedWords(parsePatch(data?.patch ?? ''))
   const fileComments = session.comments.filter(c => c.repo === repo.name && c.path === file.path)
-  const commentsAt = line => fileComments.filter(c => c.line === line)
-  const rows = parsePatch(data?.patch ?? '')
 
-  const threads = line => commentsAt(line).map(comment => jsx(CommentThread, {
-    key: comment.id, comment, sessionName: session.name, session, headCommit: repo.head
-  }))
+  const threadsAt = line => fileComments.filter(c => c.line === line).map(comment =>
+    jsx(CommentThread, { key: comment.id, comment, sessionName: session.name, session, headCommit: repo.head }))
+  const commentUiAfter = (line, key) => line === undefined ? [] : [
+    ...threadsAt(line),
+    commentLine === line && jsx(NewCommentBox, { key: `new-${key}`, sessionName: session.name, session, repo, path: file.path, line, headCommit: repo.head, onDone: () => setCommentLine(null) })
+  ]
+  const selectLine = line => () => { if (!userIsSelectingText()) setCommentLine(line) }
 
-  return jsxs('div', { className: 'font-mono text-xs', style: SELECTABLE, children: [
-    ...fileComments.filter(c => !c.line).map(comment => jsx(CommentThread, {
-      key: comment.id, comment, sessionName: session.name, session, headCommit: repo.head
-    })),
-    ...rows.flatMap((row, index) => {
-      if (row.kind === 'hunk') {
-        return [jsx('div', { key: index, className: 'px-2 py-0.5', style: { color: 'var(--ui-text-tertiary)' }, children: row.text })]
-      }
-      const clickable = row.newLine !== undefined
-      const line = jsxs('div', {
-        key: index,
-        className: 'flex whitespace-pre-wrap hover:brightness-110',
-        style: { ...SELECTABLE, background: row.kind === 'add' ? ADDED_TINT : row.kind === 'del' ? REMOVED_TINT : undefined },
-        onClick: clickable ? () => { if (!userIsSelectingText()) setCommentLine(row.newLine) } : undefined,
-        children: [
-          jsx('span', { className: 'w-10 shrink-0 pr-2 text-right', style: { userSelect: 'none', color: 'var(--ui-text-quaternary)' }, children: row.newLine ?? '' }),
-          jsx('span', { children: row.text })
-        ]
-      })
-      const extras = clickable ? [
-        ...threads(row.newLine),
-        commentLine === row.newLine && jsx(NewCommentBox, {
-          key: `new-${index}`, sessionName: session.name, session, repo, path: file.path,
-          line: row.newLine, headCommit: repo.head, onDone: () => setCommentLine(null)
-        })
-      ] : []
-      return [line, ...extras]
-    })
+  const body = mode === 'split'
+    ? toSplitRows(rows).flatMap((pair, index) => pair.hunk
+      ? [jsx(HunkBar, { key: index, text: pair.hunk.text })]
+      : [jsxs('div', { key: index, className: 'flex', children: [
+          jsx(SplitCell, { row: pair.left, language, onSelect: selectLine(pair.left?.newLine) }),
+          jsx('div', { style: { width: 1, background: 'var(--ui-stroke-secondary)' } }),
+          jsx(SplitCell, { row: pair.right, language, onSelect: selectLine(pair.right?.newLine) })
+        ] }), ...commentUiAfter(pair.right?.newLine, index)])
+    : rows.flatMap((row, index) => row.kind === 'hunk'
+      ? [jsx(HunkBar, { key: index, text: row.text })]
+      : [jsx(UnifiedRow, { key: index, row, language, onSelect: row.newLine !== undefined ? selectLine(row.newLine) : undefined }), ...commentUiAfter(row.newLine, index)])
+
+  return jsxs('div', { children: [
+    jsx(FileHeader, { file, mode, onMode: chooseMode, compact }),
+    ...fileComments.filter(c => !c.line).map(comment => jsx(CommentThread, { key: comment.id, comment, sessionName: session.name, session, headCommit: repo.head })),
+    rows.length === 0
+      ? jsx('div', { className: 'p-4 text-xs', style: { color: 'var(--ui-text-tertiary)' }, children: data ? 'No textual changes (binary file, mode change, or empty).' : 'Loading…' })
+      : jsx('div', { className: 'overflow-x-auto', style: DIFF_FONT, children: jsx('div', { style: { minWidth: '100%', width: 'max-content' }, children: body }) })
   ] })
 }
 
@@ -281,29 +504,31 @@ function Transcript({ storedSessionId }) {
 
 // --- session detail ----------------------------------------------------------------------
 
-function MergePanel({ session, onMerged }) {
+function DeletePanel({ session, onDeleted }) {
   const [plan, setPlan] = useState(null)
   const preview = async () => {
     try {
-      setPlan((await ctx.rest(`/sessions/${session.name}/merge`, { method: 'POST', body: { dry_run: true } })).log)
+      setPlan((await ctx.rest(`/sessions/${session.name}/delete`, { method: 'POST', body: { dry_run: true } })).log)
     } catch (error) {
-      host.notifyError(error, 'Cannot merge yet')
+      host.notifyError(error, 'Cannot delete this session')
     }
   }
   const confirm = async () => {
-    await ctx.rest(`/sessions/${session.name}/merge`, { method: 'POST', body: {} })
+    await ctx.rest(`/sessions/${session.name}/delete`, { method: 'POST', body: {} })
     for (const linked of session.hermes_sessions) {
       await host.request('session.archive', { session_id: linked.id, archived: true }).catch(() => {})
     }
-    host.notify({ kind: 'success', message: `Merged and removed ${session.name}` })
+    host.notify({ kind: 'success', message: `Deleted ${session.name}` })
     setPlan(null)
-    onMerged()
+    onDeleted()
   }
-  if (!plan) return jsx(Button, { onClick: preview, children: 'Merge & delete…' })
-  return jsxs('div', { className: 'flex items-center gap-2 text-xs', children: [
-    jsx('span', { children: plan.join(' · ') }),
-    jsx(Button, { onClick: confirm, children: 'Confirm merge & delete' }),
-    jsx(Button, { variant: 'ghost', onClick: () => setPlan(null), children: 'Cancel' })
+  if (!plan) return jsx(Button, { variant: 'ghost', onClick: preview, children: 'Delete session…' })
+  return jsxs('div', { className: 'flex flex-col gap-1 text-xs', children: [
+    ...plan.map((line, index) => jsx('div', { key: index, children: line })),
+    jsxs('div', { className: 'flex gap-2', children: [
+      jsx(Button, { onClick: confirm, children: 'Confirm delete' }),
+      jsx(Button, { variant: 'ghost', onClick: () => setPlan(null), children: 'Cancel' })
+    ] })
   ] })
 }
 
@@ -327,7 +552,7 @@ function SessionDetail({ name, onGone, compact = false }) {
       jsx('span', { style: { color: 'var(--ui-text-tertiary)' }, children: `${session.repos.length} repos · ${session.comments.filter(c => c.status === 'open').length} open comments` }),
       linked && jsx(Button, { variant: 'ghost', size: 'sm', onClick: () => host.openSession(linked.id, { intent: 'tab' }), children: 'Open session' }),
       linked && !compact && jsx(Button, { variant: 'ghost', size: 'sm', onClick: () => setShowTranscript(!showTranscript), children: showTranscript ? 'Hide transcript' : 'Show transcript' }),
-      jsx('div', { className: 'ml-auto', children: jsx(MergePanel, { session, onMerged: () => { refresh(); onGone() } }) })
+      jsx('div', { className: 'ml-auto', children: jsx(DeletePanel, { session, onDeleted: () => { refresh(); onGone() } }) })
     ] }),
     jsxs('div', { className: compact ? 'flex min-h-0 flex-1 flex-col' : 'flex min-h-0 flex-1', children: [
       jsx('div', { className: compact ? 'max-h-44 shrink-0 overflow-auto border-b p-2 text-xs' : 'w-72 shrink-0 overflow-auto border-r p-2 text-xs', style: { borderColor: 'var(--ui-stroke-secondary)' }, children:
@@ -347,7 +572,7 @@ function SessionDetail({ name, onGone, compact = false }) {
       }),
       jsx('div', { className: 'min-w-0 flex-1 overflow-auto p-2', children:
         selectedFile
-          ? jsx(FileDiff, { session, repo: selectedRepo, file: selectedFile, key: `${selected.repo}/${selected.path}` })
+          ? jsx(FileDiff, { session, repo: selectedRepo, file: selectedFile, compact, key: `${selected.repo}/${selected.path}` })
           : jsx('div', { className: 'p-4 text-sm', style: { color: 'var(--ui-text-tertiary)' }, children: 'Pick a file. Click a line to comment; the comment is sent to the Hermes session.' })
       }),
       showTranscript && !compact && jsx('div', { className: 'w-96 shrink-0 border-l', style: { borderColor: 'var(--ui-stroke-secondary)' }, children:

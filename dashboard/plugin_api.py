@@ -34,7 +34,7 @@ class NewSession(BaseModel):
     repos: list[str]
 
 
-class MergeRequest(BaseModel):
+class DeleteRequest(BaseModel):
     dry_run: bool = False
 
 
@@ -126,7 +126,7 @@ def set_status(name: str, comment_id: str, body: Status):
     return _review_errors_as_http(lambda: core.set_comment_status(_session(name), comment_id, body.status))
 
 
-@router.post("/sessions/{name}/merge")
-def merge(name: str, body: MergeRequest):
-    log = _review_errors_as_http(lambda: core.merge_and_remove(_session(name), dry_run=body.dry_run))
+@router.post("/sessions/{name}/delete")
+def delete(name: str, body: DeleteRequest):
+    log = _review_errors_as_http(lambda: core.delete_session(_session(name), dry_run=body.dry_run))
     return {"log": log}

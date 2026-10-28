@@ -329,51 +329,42 @@ def linked_hermes_sessions(session: Path, state_db: Path | None = None) -> list[
     return [dict(zip(("id", "title", "last_activity_at", "message_count", "ended_at"), r)) for r in rows]
 
 
-# --- merge and delete ------------------------------------------------------
+# --- delete ----------------------------------------------------------------------------------
 
-def merge_and_remove(session: Path, *, dry_run: bool = False) -> list[str]:
-    """Merge every worktree branch into its source repo's base branch, then delete the session.
+def delete_session(session: Path, *, dry_run: bool = False) -> list[str]:
+    """Remove the session's worktrees, review state and directory.
 
-    All repos are checked first; nothing is merged unless every repo can be.
+    A session branch is deleted only when everything on it is already in the base branch; otherwise the
+    branch stays in the source repo so no commits are lost. Uncommitted changes in a worktree are discarded.
     Returns a log of what was (or would be) done.
     """
-    worktrees = list_worktrees(session)
-    plans = [(wt, resolve_repo_base(wt)) for wt in worktrees]
-    for worktree, base in plans:
-        _check_mergeable(worktree, base)
     log = []
-    for worktree, base in plans:
+    removals = []
+    for worktree in list_worktrees(session):
+        base = resolve_repo_base(worktree)
+        source = Path(base.source_repo)
         branch = git(worktree, "rev-parse", "--abbrev-ref", "HEAD").strip()
-        log.append(f"{worktree.name}: merge {branch} into {base.base_branch} of {base.source_repo}")
-        if not dry_run:
-            _merge_branch(Path(base.source_repo), branch, base.base_branch)
-    if not dry_run:
-        for worktree, base in plans:
-            branch = git(worktree, "rev-parse", "--abbrev-ref", "HEAD").strip()
-            git(Path(base.source_repo), "worktree", "remove", "--force", str(worktree))
-            git(Path(base.source_repo), "branch", "-d", branch)
-        _remove_review_state(session)
-        log.append(f"removed {session}")
+        fully_merged = _is_ancestor(source, branch, base.base_branch)
+        if has_uncommitted_changes(worktree):
+            log.append(f"{worktree.name}: uncommitted changes will be discarded")
+        log.append(f"{worktree.name}: remove worktree; " + (
+            f"delete branch {branch} (already in {base.base_branch})" if fully_merged
+            else f"keep branch {branch} in {source} (has commits not in {base.base_branch})"))
+        removals.append((worktree, source, branch, fully_merged))
+    log.append(f"remove {session}")
+    if dry_run:
+        return log
+    for worktree, source, branch, fully_merged in removals:
+        git(source, "worktree", "remove", "--force", str(worktree))
+        if fully_merged:
+            git(source, "branch", "-D", branch)
+    _remove_review_state(session)
     return log
 
 
-def _check_mergeable(worktree: Path, base: RepoBase) -> None:
-    source = Path(base.source_repo)
-    if has_uncommitted_changes(worktree):
-        raise ReviewError(f"{worktree.name}: uncommitted changes in the session worktree")
-    if has_uncommitted_changes(source):
-        raise ReviewError(f"{worktree.name}: source repo {source} has uncommitted changes")
-    if _source_checked_out_branch(source) != base.base_branch:
-        raise ReviewError(f"{worktree.name}: source repo is no longer on {base.base_branch}")
-
-
-def _merge_branch(source: Path, branch: str, base_branch: str) -> None:
-    result = subprocess.run(
-        ["git", "-C", str(source), "merge", "--no-ff", "-m", f"Merge session branch {branch}", branch],
-        capture_output=True, text=True)
-    if result.returncode != 0:
-        git(source, "merge", "--abort", check=False)
-        raise ReviewError(f"merge of {branch} into {base_branch} failed: {result.stdout}{result.stderr}")
+def _is_ancestor(repo: Path, commit: str, other: str) -> bool:
+    return subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", commit, other],
+                          capture_output=True).returncode == 0
 
 
 def _remove_review_state(session: Path) -> None:

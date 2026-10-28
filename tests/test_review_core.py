@@ -69,7 +69,7 @@ def test_comment_thread_lifecycle(workspace):
     assert stored[0]["status"] == "resolved"
     assert [m["author"] for m in stored[0]["thread"]] == ["user", "agent"]
     message = core.format_comment_for_agent(stored[0])
-    assert "a.txt:2" in message and "RUNNING this shell command" in message
+    assert "a.txt:2" in message and "posted to the review thread automatically" in message
     with pytest.raises(core.ReviewError):
         core.reply_to_comment(session, "nope", "x")
 

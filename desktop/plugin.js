@@ -17,20 +17,44 @@ const refresh = () => queryClient.invalidateQueries({ queryKey: [ID] })
 
 // --- delivering text to the Hermes session -------------------------------------------
 
-/** Resume the stored session (reuses it if live) and send it a user turn. */
+// Comments sent to a live session, waiting for that session's next final reply.
+// runtime session id -> [{ sessionName, commentId, sentAt }] (oldest first)
+const pendingReplies = new Map()
+
+/** Resume the stored session (reuses it if live) and send it a user turn. Returns the runtime id. */
 async function sendToHermesSession(storedSessionId, text) {
   const resumed = await host.request('session.resume', { session_id: storedSessionId, lazy: true })
   await host.request('prompt.submit', { session_id: resumed.session_id, text })
+  return resumed.session_id
 }
 
-async function deliverToLinkedSession(session, text) {
+/** The agent's final message for a turn becomes its answer in the comment thread. */
+async function postFinalReplyToThread(event) {
+  const runtimeSessionId = event.session_id ?? event.sessionId
+  const text = (event.payload?.text ?? '').trim()
+  const waiting = pendingReplies.get(runtimeSessionId)
+  if (!waiting?.length || !text) return
+  const { sessionName, commentId, sentAt } = waiting.shift()
+  const session = await ctx.rest(`/sessions/${sessionName}`)
+  const thread = session.comments.find(c => c.id === commentId)?.thread ?? []
+  const agentAlreadyAnswered = thread.some(m => m.author === 'agent' && m.time * 1000 >= sentAt)
+  if (!agentAlreadyAnswered) {
+    await ctx.rest(`/sessions/${sessionName}/comments/${commentId}/reply`, { method: 'POST', body: { body: text, author: 'agent' } })
+  }
+  refresh()
+}
+
+async function deliverToLinkedSession(session, text, commentId) {
   const target = session.hermes_sessions?.[0]
   if (!target) {
     host.notify({ kind: 'warning', message: 'Saved, but no Hermes session has this directory as its cwd.' })
     return
   }
   try {
-    await sendToHermesSession(target.id, text)
+    const runtimeSessionId = await sendToHermesSession(target.id, text)
+    const queue = pendingReplies.get(runtimeSessionId) ?? []
+    queue.push({ sessionName: session.name, commentId, sentAt: Date.now() })
+    pendingReplies.set(runtimeSessionId, queue)
   } catch (error) {
     host.notifyError(error, 'Saved, but delivering to the Hermes session failed')
   }
@@ -74,7 +98,7 @@ function CommentThread({ comment, sessionName, session, headCommit }) {
   }
   const sendReply = async () => {
     await post('reply', { body: replyText })
-    await deliverToLinkedSession(session, `Follow-up on review comment ${comment.id}:\n${replyText}`)
+    await deliverToLinkedSession(session, `Follow-up on review comment ${comment.id}:\n${replyText}\n\n(Your final reply is posted to the review thread automatically.)`, comment.id)
     setReplyText('')
   }
 
@@ -110,7 +134,7 @@ function NewCommentBox({ sessionName, session, repo, path, line, headCommit, onD
     })
     refresh()
     onDone()
-    await deliverToLinkedSession(session, created.agent_message)
+    await deliverToLinkedSession(session, created.agent_message, created.comment.id)
   }
   return jsxs('div', { className: 'my-1 ml-10 flex gap-2', children: [
     jsx(Textarea, { rows: 2, autoFocus: true, value: body, placeholder: 'Comment (sent to the Hermes session)…', onChange: e => setBody(e.target.value) }),
@@ -278,6 +302,7 @@ export default {
   name: 'Session Review',
   register(pluginContext) {
     ctx = pluginContext
+    ctx.onEvent('message.complete', event => postFinalReplyToThread(event).catch(error => host.notifyError(error, 'Could not post the agent reply')))
     ctx.register({ id: 'page', area: ROUTES_AREA, data: { path: '/session-review' }, render: () => jsx(ReviewPage, {}) })
     ctx.register({ id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: '/session-review', label: 'Session Review', codicon: 'git-pull-request' } })
   }

@@ -22,7 +22,6 @@ from pathlib import Path
 REVIEW_DIRNAME = ".review"
 COMMENTS_FILENAME = "comments.json"
 FALLBACK_BASE_BRANCHES = ("main", "master")
-CLI_PATH = Path(__file__).resolve().parent / "bin" / "session-review"
 
 
 class ReviewError(Exception):
@@ -247,10 +246,8 @@ def format_comment_for_agent(comment: dict) -> str:
     if comment["line"]:
         where += f":{comment['line']}"
     return (f"Review comment {comment['id']} on {where}:\n{comment['thread'][-1]['body']}\n\n"
-            f"If a change is needed, make it and commit it. In every case, finish by RUNNING this "
-            f"shell command with your terminal tool (do not just print it); it is the only way your "
-            f"answer reaches the reviewer:\n"
-            f"{CLI_PATH} reply {comment['id']} \"<your answer>\" [--resolve]\n")
+            f"If a change is needed, make it and commit it. Your final reply to this message is "
+            f"posted to the review thread automatically, so answer the reviewer directly.")
 
 
 # --- link to hermes sessions ------------------------------------------------

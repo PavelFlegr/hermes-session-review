@@ -592,17 +592,38 @@ function FileTree({ session, selected, onSelect }) {
 
 // --- session detail ----------------------------------------------------------------------
 
+/** Tear down the linked live sessions first: an open terminal inside the directory blocks its removal on Windows. */
+async function closeLinkedSessions(session) {
+  for (const linked of session.hermes_sessions) {
+    try {
+      const resumed = await host.request('session.resume', { session_id: linked.id, lazy: true })
+      await host.request('session.close', { session_id: resumed.session_id })
+    } catch (error) {
+      host.notifyError(error, `Could not close session ${linked.title || linked.id}; deleting anyway`)
+    }
+  }
+}
+
 function DeletePanel({ session, onDeleted }) {
   const [plan, setPlan] = useState(null)
   const preview = async () => {
     try {
-      setPlan((await ctx.rest(`/sessions/${session.name}/delete`, { method: 'POST', body: { dry_run: true } })).log)
+      const { log } = await ctx.rest(`/sessions/${session.name}/delete`, { method: 'POST', body: { dry_run: true } })
+      const closing = session.hermes_sessions.length ? [`close ${session.hermes_sessions.length} linked Hermes session(s), then archive them (transcripts are kept)`] : []
+      setPlan([...closing, ...log])
     } catch (error) {
       host.notifyError(error, 'Cannot delete this session')
     }
   }
   const confirm = async () => {
-    await ctx.rest(`/sessions/${session.name}/delete`, { method: 'POST', body: {} })
+    try {
+      await closeLinkedSessions(session)
+      await ctx.rest(`/sessions/${session.name}/delete`, { method: 'POST', body: {} })
+    } catch (error) {
+      // The linked sessions are already closed here; they stay resumable from the session list.
+      host.notifyError(error, 'Delete failed')
+      return
+    }
     for (const linked of session.hermes_sessions) {
       await host.request('session.archive', { session_id: linked.id, archived: true }).catch(() => {})
     }

@@ -431,6 +431,165 @@ function FileDiff({ session, repo, file }) {
   ] })
 }
 
+// --- merge indicators --------------------------------------------------------------------------
+
+const MERGED_GREEN = '#2ea043'
+const UNMERGED_AMBER = '#d29922'
+
+/** Label and colour for a repo's (or a whole session's) relation to its base branch. */
+export function mergeBadge(state, unmergedCommits = 0, totalCommits = 0) {
+  if (state === 'merged') return { label: 'Merged', color: MERGED_GREEN, icon: 'git-merge' }
+  if (state === 'partial') return { label: `${unmergedCommits} of ${totalCommits} unmerged`, color: UNMERGED_AMBER, icon: 'git-pull-request' }
+  if (state === 'unmerged') return { label: totalCommits ? `${unmergedCommits} unmerged` : 'Unmerged', color: UNMERGED_AMBER, icon: 'git-pull-request' }
+  return { label: 'No commits', color: 'var(--ui-text-quaternary)', icon: 'circle-outline' }
+}
+
+function MergeBadge({ state, unmergedCommits, totalCommits }) {
+  if (state === undefined) return null // an outdated backend does not send merge state; the banner explains it
+  const badge = mergeBadge(state, unmergedCommits, totalCommits)
+  return jsxs('span', { className: 'inline-flex items-center gap-1 whitespace-nowrap', style: { color: badge.color }, children: [jsx(Codicon, { name: badge.icon }), badge.label] })
+}
+
+function CommitList({ commits }) {
+  return jsx('div', { className: 'mb-1 pl-5', children: commits.map(commit => jsxs('div', {
+    key: commit.sha, className: 'flex items-center gap-1.5 py-0.5', title: commit.merged ? 'In the base branch' : 'Not in the base branch yet', style: SELECTABLE,
+    children: [
+      commit.merged !== undefined && jsx(Codicon, { name: commit.merged ? 'pass-filled' : 'circle-large-outline', style: { color: commit.merged ? MERGED_GREEN : UNMERGED_AMBER } }),
+      jsx('span', { className: 'font-mono', style: { color: 'var(--ui-text-tertiary)' }, children: commit.sha.slice(0, 7) }),
+      jsx('span', { className: 'min-w-0 truncate', children: commit.subject })
+    ]
+  })) })
+}
+
+// --- file tree ---------------------------------------------------------------------------------
+
+/**
+ * Nest changed files into folders. Chains of folders with a single folder child are merged into one
+ * row ("src/app/ui"), folders sort before files, and folders carry their files' summed stats.
+ */
+export function buildFileTree(files) {
+  const root = { kind: 'dir', name: '', path: '', children: [] }
+  for (const file of files) {
+    const parts = file.path.split('/')
+    let directory = root
+    parts.slice(0, -1).forEach((part, depth) => {
+      const path = parts.slice(0, depth + 1).join('/')
+      let child = directory.children.find(c => c.kind === 'dir' && c.path === path)
+      if (!child) { child = { kind: 'dir', name: part, path, children: [] }; directory.children.push(child) }
+      directory = child
+    })
+    directory.children.push({ kind: 'file', name: parts[parts.length - 1], path: file.path, file })
+  }
+  return finishTree(root.children)
+}
+
+function finishTree(nodes) {
+  const finished = nodes.map(node => {
+    if (node.kind === 'file') return node
+    let directory = { ...node, children: finishTree(node.children) }
+    while (directory.children.length === 1 && directory.children[0].kind === 'dir') {
+      const only = directory.children[0]
+      directory = { ...only, name: `${directory.name}/${only.name}` }
+    }
+    return { ...directory, ...sumStats(directory.children) }
+  })
+  return finished.sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === 'dir' ? -1 : 1))
+}
+
+function sumStats(children) {
+  return children.reduce((total, child) => {
+    const stats = child.kind === 'file' ? { files: 1, additions: child.file.additions, deletions: child.file.deletions } : child
+    return { files: total.files + stats.files, additions: total.additions + stats.additions, deletions: total.deletions + stats.deletions }
+  }, { files: 0, additions: 0, deletions: 0 })
+}
+
+export function filterFiles(files, query) {
+  const needle = query.trim().toLowerCase()
+  return needle ? files.filter(file => file.path.toLowerCase().includes(needle)) : files
+}
+
+const STATUS_MARK = {
+  added: { letter: 'A', color: '#2ea043' },
+  untracked: { letter: 'U', color: '#2ea043' },
+  modified: { letter: 'M', color: '#d29922' },
+  deleted: { letter: 'D', color: '#f85149' }
+}
+const ROW_INDENT_REM = 0.875
+
+function TreeRow({ depth, selected, onClick, children }) {
+  return jsx('div', {
+    className: 'flex cursor-pointer items-center gap-1.5 rounded py-0.5 pr-1 hover:bg-(--chrome-action-hover)',
+    style: { paddingLeft: `${0.25 + depth * ROW_INDENT_REM}rem`, background: selected ? 'color-mix(in srgb, var(--ui-accent) 16%, transparent)' : undefined },
+    onClick, children
+  })
+}
+
+function TreeNodes({ nodes, depth, repoName, selected, onSelect, collapsed, toggle, openCommentsByPath, forceOpen }) {
+  return nodes.flatMap(node => {
+    if (node.kind === 'dir') {
+      const isOpen = forceOpen || !collapsed.has(`${repoName}:${node.path}`)
+      return [
+        jsxs(TreeRow, { key: `d:${node.path}`, depth, onClick: () => toggle(`${repoName}:${node.path}`), children: [
+          jsx(Codicon, { name: isOpen ? 'chevron-down' : 'chevron-right', style: { color: 'var(--ui-text-tertiary)' } }),
+          jsx(Codicon, { name: isOpen ? 'folder-opened' : 'folder', style: { color: 'var(--ui-accent)' } }),
+          jsx('span', { className: 'min-w-0 flex-1 truncate', children: node.name }),
+          jsx('span', { style: { color: 'var(--ui-text-quaternary)' }, children: node.files })
+        ] }),
+        ...(isOpen ? [jsx(TreeNodes, { key: `c:${node.path}`, nodes: node.children, depth: depth + 1, repoName, selected, onSelect, collapsed, toggle, openCommentsByPath, forceOpen })] : [])
+      ]
+    }
+    const { file } = node
+    const mark = STATUS_MARK[file.status] ?? STATUS_MARK.modified
+    const isSelected = selected?.repo === repoName && selected?.path === file.path
+    const comments = openCommentsByPath[file.path] ?? 0
+    return [jsxs(TreeRow, { key: `f:${file.path}`, depth, selected: isSelected, onClick: () => onSelect({ repo: repoName, path: file.path }), children: [
+      jsx('span', { className: 'w-3.5 shrink-0' }),
+      jsx(Codicon, { name: 'file', style: { color: 'var(--ui-text-tertiary)' } }),
+      jsx('span', { className: 'min-w-0 flex-1 truncate', title: file.path, style: { fontWeight: isSelected ? 600 : 400, textDecoration: file.status === 'deleted' ? 'line-through' : undefined }, children: node.name }),
+      comments > 0 && jsxs('span', { className: 'flex items-center gap-0.5', style: { color: 'var(--ui-accent)' }, children: [jsx(Codicon, { name: 'comment' }), comments] }),
+      jsx('span', { style: { color: '#2ea043' }, children: `+${file.additions}` }),
+      jsx('span', { style: { color: '#f85149' }, children: `−${file.deletions}` }),
+      jsx('span', { className: 'w-3 shrink-0 text-center font-medium', style: { color: mark.color }, title: file.status, children: mark.letter })
+    ] })]
+  })
+}
+
+function RepoTree({ repo, comments, selected, onSelect, query }) {
+  const [collapsed, setCollapsed] = useState(() => new Set())
+  const [repoOpen, setRepoOpen] = useState(true)
+  const toggle = key => setCollapsed(previous => { const next = new Set(previous); next.has(key) ? next.delete(key) : next.add(key); return next })
+  const openCommentsByPath = {}
+  for (const comment of comments) {
+    if (comment.repo === repo.name && comment.path && comment.status === 'open') openCommentsByPath[comment.path] = (openCommentsByPath[comment.path] ?? 0) + 1
+  }
+  const visibleFiles = filterFiles(repo.files, query)
+  const filtering = query.trim() !== ''
+  if (filtering && visibleFiles.length === 0) return null
+
+  return jsxs('div', { className: 'mb-3', children: [
+    jsxs('div', { className: 'flex cursor-pointer items-center gap-1.5 py-1 font-medium', onClick: () => setRepoOpen(!repoOpen), children: [
+      jsx(Codicon, { name: repoOpen ? 'chevron-down' : 'chevron-right', style: { color: 'var(--ui-text-tertiary)' } }),
+      jsx(Codicon, { name: 'repo' }),
+      jsx('span', { className: 'min-w-0 truncate', children: repo.name }),
+      repo.uncommitted && jsx('span', { title: 'uncommitted changes', style: { color: UNMERGED_AMBER }, children: '●' }),
+      jsx('span', { className: 'ml-auto', children: jsx(MergeBadge, { state: repo.merge_state, unmergedCommits: repo.unmerged_commits, totalCommits: repo.commits.length }) })
+    ] }),
+    jsxs('div', { className: 'mb-1 pl-5', style: { color: 'var(--ui-text-tertiary)' }, children:
+      `${repo.branch} → ${repo.base_branch} · ${repo.files.length} files · +${repo.additions} −${repo.deletions}` }),
+    repoOpen && repo.commits.length > 0 && jsx(CommitList, { commits: repo.commits }),
+    repoOpen && jsx(TreeNodes, { nodes: buildFileTree(visibleFiles), depth: 0, repoName: repo.name, selected, onSelect, collapsed, toggle, openCommentsByPath, forceOpen: filtering })
+  ] })
+}
+
+function FileTree({ session, selected, onSelect }) {
+  const [query, setQuery] = useState('')
+  return jsxs('div', { children: [
+    jsx(Input, { value: query, placeholder: 'Filter files…', onChange: e => setQuery(e.target.value), className: 'mb-2' }),
+    ...session.repos.map(repo => jsx(RepoTree, { key: repo.name, repo, comments: session.comments, selected, onSelect, query })),
+    session.repos.length === 0 && jsx('div', { style: { color: 'var(--ui-text-tertiary)' }, children: 'No repositories in this session yet.' })
+  ] })
+}
+
 // --- session detail ----------------------------------------------------------------------
 
 function DeletePanel({ session, onDeleted }) {

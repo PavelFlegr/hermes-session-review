@@ -11,6 +11,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import time
@@ -88,6 +89,61 @@ def _source_checked_out_branch(source_repo: Path) -> str:
         if git(source_repo, "rev-parse", "--verify", "-q", candidate, check=False).strip():
             return candidate
     raise ReviewError(f"cannot determine base branch of {source_repo}")
+
+
+# --- creating a review session ------------------------------------------------
+
+SESSION_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+
+
+def repo_search_root() -> Path:
+    return Path(os.environ.get("HERMES_REPO_SEARCH_ROOT", Path.home() / "Projects"))
+
+
+def list_candidate_repos() -> list[dict]:
+    """Real repositories (not worktrees) directly under the search root."""
+    root = repo_search_root()
+    if not root.is_dir():
+        return []
+    return [{"name": p.name, "path": str(p)} for p in sorted(root.iterdir())
+            if (p / ".git").is_dir() and p != sessions_root()]
+
+
+def add_repo_to_session(session_name: str, source_repo: Path) -> Path:
+    """Create `<session>/<repo>` as a worktree on branch `hermes/<session>` forked from the repo's current branch."""
+    if not SESSION_NAME_PATTERN.match(session_name):
+        raise ReviewError("session name must be lowercase letters, digits and dashes")
+    source_repo = source_repo.resolve()
+    if not (source_repo / ".git").is_dir():
+        raise ReviewError(f"{source_repo} is not the root of a git repository")
+    session = sessions_root() / session_name
+    target = session / source_repo.name
+    if target.exists():
+        raise ReviewError(f"{target} already exists")
+    session.mkdir(parents=True, exist_ok=True)
+    git(source_repo, "worktree", "add", "-b", f"hermes/{session_name}", str(target))
+    return target
+
+
+def create_session(session_name: str, source_repos: list[Path]) -> Path:
+    """Create a session directory with one worktree per repo; leave nothing behind if any repo fails."""
+    if not source_repos:
+        raise ReviewError("pick at least one repository")
+    session = sessions_root() / session_name
+    if session.exists():
+        raise ReviewError(f"session {session_name!r} already exists")
+    created: list[tuple[Path, Path]] = []
+    try:
+        for source in source_repos:
+            created.append((source.resolve(), add_repo_to_session(session_name, source)))
+    except ReviewError:
+        for source, worktree in created:
+            git(source, "worktree", "remove", "--force", str(worktree), check=False)
+            git(source, "branch", "-D", f"hermes/{session_name}", check=False)
+        if session.exists() and not any(session.iterdir()):
+            session.rmdir()
+        raise
+    return session
 
 
 # --- changes ---------------------------------------------------------------

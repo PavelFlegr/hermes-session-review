@@ -104,3 +104,29 @@ def test_merge_conflict_aborts_and_keeps_session(workspace):
     with pytest.raises(core.ReviewError, match="failed"):
         core.merge_and_remove(session)
     assert session.exists() and not core.has_uncommitted_changes(source)
+
+
+def test_create_session_makes_one_worktree_per_repo(workspace, tmp_path, monkeypatch):
+    source, _, _ = workspace
+    monkeypatch.setenv("HERMES_SESSIONS_ROOT", str(tmp_path / "new-root"))
+    monkeypatch.setenv("HERMES_REPO_SEARCH_ROOT", str(tmp_path))
+    session = core.create_session("feature-x", [source])
+    assert [w.name for w in core.list_worktrees(session)] == ["source"]
+    assert core.summarize_session(session)["repos"][0]["branch"] == "hermes/feature-x"
+    assert [r["name"] for r in core.list_candidate_repos()] == ["source"]
+
+
+def test_create_session_rolls_back_when_one_repo_fails(workspace, tmp_path, monkeypatch):
+    source, _, _ = workspace
+    monkeypatch.setenv("HERMES_SESSIONS_ROOT", str(tmp_path / "new-root"))
+    with pytest.raises(core.ReviewError):
+        core.create_session("feature-y", [source, tmp_path / "not-a-repo"])
+    assert not (tmp_path / "new-root" / "feature-y").exists()
+    assert "hermes/feature-y" not in subprocess.run(
+        ["git", "-C", str(source), "branch"], capture_output=True, text=True).stdout
+
+
+def test_create_session_rejects_bad_names(workspace):
+    source, _, _ = workspace
+    with pytest.raises(core.ReviewError):
+        core.add_repo_to_session("../escape", source)

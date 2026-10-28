@@ -29,6 +29,11 @@ class Status(BaseModel):
     status: str
 
 
+class NewSession(BaseModel):
+    name: str
+    repos: list[str]
+
+
 class MergeRequest(BaseModel):
     dry_run: bool = False
 
@@ -69,6 +74,19 @@ def list_sessions():
             "hermes_sessions": core.linked_hermes_sessions(session),
         })
     return {"root": str(core.sessions_root()), "sessions": rows}
+
+
+@router.get("/repos")
+def candidate_repos():
+    return {"repos": core.list_candidate_repos(), "sessions_root": str(core.sessions_root())}
+
+
+@router.post("/sessions")
+def create_session(body: NewSession):
+    if not core.SESSION_NAME_PATTERN.match(body.name):
+        raise HTTPException(400, "session name must be lowercase letters, digits and dashes")
+    session = _review_errors_as_http(lambda: core.create_session(body.name, [Path(r) for r in body.repos]))
+    return {"name": session.name, "path": str(session)}
 
 
 @router.get("/sessions/{name}")

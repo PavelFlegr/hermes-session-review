@@ -9,12 +9,7 @@ import review_core as core  # noqa: E402
 
 
 def add_repo(args):
-    source = Path(args.source_repo).resolve()
-    session = core.sessions_root() / args.session
-    session.mkdir(parents=True, exist_ok=True)
-    target = session / source.name
-    core.git(source, "worktree", "add", "-b", f"hermes/{args.session}", str(target))
-    print(target)
+    print(core.add_repo_to_session(args.session, Path(args.source_repo)))
 
 
 def comments(args):

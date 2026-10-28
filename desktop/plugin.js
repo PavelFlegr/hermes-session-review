@@ -3,7 +3,7 @@
 // Data comes from this plugin's Python backend (ctx.rest); comments are delivered to the
 // Hermes session through the gateway (host.request).
 import {
-  Badge, Button, Textarea, ROUTES_AREA, SIDEBAR_NAV_AREA, host, queryClient, useQuery
+  Badge, Button, Input, Textarea, ROUTES_AREA, SIDEBAR_NAV_AREA, host, queryClient, useQuery
 } from '@hermes/plugin-sdk'
 import { useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
@@ -280,10 +280,68 @@ function SessionDetail({ name, onGone }) {
   ] })
 }
 
+// --- creating a review session -----------------------------------------------------------
+
+/** What the agent is told when a review session starts; later comments arrive as plain messages. */
+function reviewSessionBrief(name, directory, repoNames, task) {
+  return [
+    `This is a review-style session named "${name}". Your working directory is ${directory}.`,
+    `It contains one git worktree per repository (${repoNames.join(', ')}), each on branch hermes/${name}.`,
+    'Work only inside these worktrees. Commit your changes at the end of every turn, in small commits with descriptive messages, so the reviewer sees stable diffs.',
+    'The reviewer will send comments as messages. Answer them directly; your final reply is posted to the review thread.',
+    '',
+    `Task: ${task}`
+  ].join('\n')
+}
+
+function NewSessionForm({ onCreated, onCancel }) {
+  const [name, setName] = useState('')
+  const [task, setTask] = useState('')
+  const [chosen, setChosen] = useState([])
+  const [busy, setBusy] = useState(false)
+  const { data } = useQuery({ queryKey: [ID, 'repos'], queryFn: () => ctx.rest('/repos') })
+  const repos = data?.repos ?? []
+  const nameValid = /^[a-z0-9][a-z0-9-]*$/.test(name)
+  const toggle = path => setChosen(chosen.includes(path) ? chosen.filter(p => p !== path) : [...chosen, path])
+
+  const create = async () => {
+    setBusy(true)
+    try {
+      const made = await ctx.rest('/sessions', { method: 'POST', body: { name, repos: chosen } })
+      const live = await host.request('session.create', { cwd: made.path, cwd_explicit: true, title: name })
+      const repoNames = chosen.map(path => path.split('/').pop())
+      if (task.trim()) {
+        await host.request('prompt.submit', { session_id: live.session_id, text: reviewSessionBrief(name, made.path, repoNames, task.trim()) })
+      }
+      refresh()
+      onCreated(name)
+    } catch (error) {
+      host.notifyError(error, 'Could not create the review session')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return jsxs('div', { className: 'flex max-w-xl flex-col gap-3 p-4 text-sm', children: [
+    jsx('b', { children: 'New review session' }),
+    jsx(Input, { value: name, placeholder: 'name (lowercase, digits, dashes)', onChange: e => setName(e.target.value.trim()) }),
+    jsx('div', { className: 'text-xs', style: { color: 'var(--ui-text-tertiary)' }, children: `Repositories (worktrees are created under ${data?.sessions_root ?? '…'}/${name || '<name>'})` }),
+    jsx('div', { className: 'max-h-48 overflow-auto', children: repos.map(repo => jsxs('label', { key: repo.path, className: 'flex items-center gap-2 py-0.5', children: [
+      jsx('input', { type: 'checkbox', checked: chosen.includes(repo.path), onChange: () => toggle(repo.path) }), repo.name
+    ] })) }),
+    jsx(Textarea, { rows: 4, value: task, placeholder: 'Task for the agent (optional; you can also just open the session and talk)', onChange: e => setTask(e.target.value) }),
+    jsxs('div', { className: 'flex gap-2', children: [
+      jsx(Button, { disabled: busy || !nameValid || chosen.length === 0, onClick: create, children: busy ? 'Creating…' : 'Create' }),
+      jsx(Button, { variant: 'ghost', onClick: onCancel, children: 'Cancel' })
+    ] })
+  ] })
+}
+
 // --- page --------------------------------------------------------------------------------
 
 function ReviewPage() {
   const [selectedName, setSelectedName] = useState(null)
+  const [creating, setCreating] = useState(false)
   const { data } = useQuery({
     queryKey: [ID, 'list'], queryFn: () => ctx.rest('/sessions'), refetchInterval: POLL_MS
   })
@@ -291,12 +349,13 @@ function ReviewPage() {
 
   return jsxs('div', { className: 'flex h-full min-h-0', children: [
     jsxs('div', { className: 'w-64 shrink-0 overflow-auto border-r p-2 text-sm', style: { borderColor: 'var(--ui-stroke-secondary)' }, children: [
+      jsx(Button, { size: 'sm', className: 'mb-2 w-full', onClick: () => { setCreating(true); setSelectedName(null) }, children: 'New review session' }),
       jsx('div', { className: 'mb-2 text-xs', style: { color: 'var(--ui-text-tertiary)' }, children: data?.root ?? '' }),
       ...sessions.map(session => jsxs('div', {
         key: session.name,
         className: 'cursor-pointer rounded p-2 hover:bg-(--chrome-action-hover)',
         style: { fontWeight: selectedName === session.name ? 600 : 400 },
-        onClick: () => setSelectedName(session.name),
+        onClick: () => { setCreating(false); setSelectedName(session.name) },
         children: [
           jsx('div', { className: 'truncate', children: session.hermes_sessions[0]?.title || session.name }),
           jsx('div', { className: 'text-xs', style: { color: 'var(--ui-text-tertiary)' },
@@ -305,7 +364,9 @@ function ReviewPage() {
       })),
       sessions.length === 0 && jsx('div', { className: 'text-xs', children: 'No session directories yet.' })
     ] }),
-    jsx('div', { className: 'min-w-0 flex-1', children: selectedName
+    jsx('div', { className: 'min-w-0 flex-1', children: creating
+      ? jsx(NewSessionForm, { onCreated: name => { setCreating(false); setSelectedName(name) }, onCancel: () => setCreating(false) })
+      : selectedName
       ? jsx(SessionDetail, { name: selectedName, key: selectedName, onGone: () => setSelectedName(null) })
       : jsx('div', { className: 'p-4 text-sm', children: 'Select a session.' }) })
   ] })

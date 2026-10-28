@@ -317,6 +317,23 @@ def load_comments(session: Path) -> list[dict]:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
 
 
+LOCK_TIMEOUT_SECONDS = 60
+LOCK_RETRY_SECONDS = 0.02
+
+
+def _acquire_windows_lock(handle) -> None:
+    """msvcrt's blocking mode gives up after ~10 s with EDEADLOCK, so poll the non-blocking mode instead."""
+    deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+    while True:
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            return
+        except OSError:
+            if time.monotonic() > deadline:
+                raise ReviewError("timed out waiting for the review comments lock")
+            time.sleep(LOCK_RETRY_SECONDS)
+
+
 @contextmanager
 def _exclusive_lock(lock_file: Path):
     """Cross-process lock: flock on Unix, a one-byte msvcrt lock on Windows (which needs a byte to lock)."""
@@ -326,7 +343,7 @@ def _exclusive_lock(lock_file: Path):
                 handle.write(b"0")
                 handle.flush()
             handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)  # retries for ~10 s, then raises OSError
+            _acquire_windows_lock(handle)
             try:
                 yield
             finally:

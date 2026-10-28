@@ -30,6 +30,7 @@ async function sendToHermesSession(storedSessionId, text) {
 
 /** The agent's final message for a turn becomes its answer in the comment thread. */
 async function postFinalReplyToThread(event) {
+  if (event.replayed) return // a reconnect replaying an old turn must not repost it
   const runtimeSessionId = event.session_id ?? event.sessionId
   const text = (event.payload?.text ?? '').trim()
   const waiting = pendingReplies.get(runtimeSessionId)

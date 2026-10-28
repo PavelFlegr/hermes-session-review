@@ -23,6 +23,7 @@ from pathlib import Path
 REVIEW_DIRNAME = ".review"
 COMMENTS_FILENAME = "comments.json"
 FALLBACK_BASE_BRANCHES = ("main", "master")
+CLI_PATH = Path(__file__).resolve().parent / "bin" / "session-review"
 
 
 class ReviewError(Exception):
@@ -126,12 +127,16 @@ def add_repo_to_session(session_name: str, source_repo: Path) -> Path:
 
 
 def create_session(session_name: str, source_repos: list[Path]) -> Path:
-    """Create a session directory with one worktree per repo; leave nothing behind if any repo fails."""
-    if not source_repos:
-        raise ReviewError("pick at least one repository")
+    """Create a session directory with one worktree per repo; leave nothing behind if any repo fails.
+
+    With no repos the directory is created empty; the agent adds worktrees later with `add-repo`.
+    """
+    if not SESSION_NAME_PATTERN.match(session_name):
+        raise ReviewError("session name must be lowercase letters, digits and dashes")
     session = sessions_root() / session_name
     if session.exists():
         raise ReviewError(f"session {session_name!r} already exists")
+    session.mkdir(parents=True)
     created: list[tuple[Path, Path]] = []
     try:
         for source in source_repos:
@@ -140,7 +145,7 @@ def create_session(session_name: str, source_repos: list[Path]) -> Path:
         for source, worktree in created:
             git(source, "worktree", "remove", "--force", str(worktree), check=False)
             git(source, "branch", "-D", f"hermes/{session_name}", check=False)
-        if session.exists() and not any(session.iterdir()):
+        if not any(session.iterdir()):
             session.rmdir()
         raise
     return session

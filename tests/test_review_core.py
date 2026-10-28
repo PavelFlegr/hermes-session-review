@@ -130,3 +130,10 @@ def test_create_session_rejects_bad_names(workspace):
     source, _, _ = workspace
     with pytest.raises(core.ReviewError):
         core.add_repo_to_session("../escape", source)
+
+
+def test_create_session_without_repos_makes_empty_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_SESSIONS_ROOT", str(tmp_path / "root"))
+    session = core.create_session("empty-one", [])
+    assert session.is_dir() and core.list_worktrees(session) == []
+    assert core.summarize_session(session)["repos"] == []

@@ -283,11 +283,15 @@ function SessionDetail({ name, onGone }) {
 // --- creating a review session -----------------------------------------------------------
 
 /** What the agent is told when a review session starts; later comments arrive as plain messages. */
-function reviewSessionBrief(name, directory, repoNames, task) {
+function reviewSessionBrief({ name, directory, repoNames, task, cliPath }) {
+  const repoLine = repoNames.length
+    ? `It contains one git worktree per repository (${repoNames.join(', ')}), each on branch hermes/${name}.`
+    : `It contains no repositories yet. Before you change any repository, add it to this session with: ${cliPath} add-repo ${name} <path-to-repo> ` +
+      '(creates a worktree on branch hermes/' + name + ' here). Never edit a repository outside this directory.'
   return [
     `This is a review-style session named "${name}". Your working directory is ${directory}.`,
-    `It contains one git worktree per repository (${repoNames.join(', ')}), each on branch hermes/${name}.`,
-    'Work only inside these worktrees. Commit your changes at the end of every turn, in small commits with descriptive messages, so the reviewer sees stable diffs.',
+    repoLine,
+    'Work only inside the worktrees in this directory. Commit your changes at the end of every turn, in small commits with descriptive messages, so the reviewer sees stable diffs.',
     'The reviewer will send comments as messages. Answer them directly; your final reply is posted to the review thread.',
     '',
     `Task: ${task}`
@@ -311,7 +315,7 @@ function NewSessionForm({ onCreated, onCancel }) {
       const live = await host.request('session.create', { cwd: made.path, cwd_explicit: true, title: name })
       const repoNames = chosen.map(path => path.split('/').pop())
       if (task.trim()) {
-        await host.request('prompt.submit', { session_id: live.session_id, text: reviewSessionBrief(name, made.path, repoNames, task.trim()) })
+        await host.request('prompt.submit', { session_id: live.session_id, text: reviewSessionBrief({ name, directory: made.path, repoNames, task: task.trim(), cliPath: data.cli_path }) })
       }
       refresh()
       onCreated(name)
@@ -325,13 +329,13 @@ function NewSessionForm({ onCreated, onCancel }) {
   return jsxs('div', { className: 'flex max-w-xl flex-col gap-3 p-4 text-sm', children: [
     jsx('b', { children: 'New review session' }),
     jsx(Input, { value: name, placeholder: 'name (lowercase, digits, dashes)', onChange: e => setName(e.target.value.trim()) }),
-    jsx('div', { className: 'text-xs', style: { color: 'var(--ui-text-tertiary)' }, children: `Repositories (worktrees are created under ${data?.sessions_root ?? '…'}/${name || '<name>'})` }),
+    jsx('div', { className: 'text-xs', style: { color: 'var(--ui-text-tertiary)' }, children: `Repositories (optional). Leave empty and the agent adds each repo as a worktree when it needs it.` }),
     jsx('div', { className: 'max-h-48 overflow-auto', children: repos.map(repo => jsxs('label', { key: repo.path, className: 'flex items-center gap-2 py-0.5', children: [
       jsx('input', { type: 'checkbox', checked: chosen.includes(repo.path), onChange: () => toggle(repo.path) }), repo.name
     ] })) }),
     jsx(Textarea, { rows: 4, value: task, placeholder: 'Task for the agent (optional; you can also just open the session and talk)', onChange: e => setTask(e.target.value) }),
     jsxs('div', { className: 'flex gap-2', children: [
-      jsx(Button, { disabled: busy || !nameValid || chosen.length === 0, onClick: create, children: busy ? 'Creating…' : 'Create' }),
+      jsx(Button, { disabled: busy || !nameValid, onClick: create, children: busy ? 'Creating…' : 'Create' }),
       jsx(Button, { variant: 'ghost', onClick: onCancel, children: 'Cancel' })
     ] })
   ] })

@@ -30,8 +30,20 @@ class ReviewError(Exception):
     """A problem the caller should show to the user as-is."""
 
 
+def _setting(env_name: str, config_key: str, default: Path) -> Path:
+    """Environment variable first, then `$HERMES_HOME/plugin-data/session-review/config.json`, then the default."""
+    if env_name in os.environ:
+        return Path(os.environ[env_name]).expanduser()
+    config_file = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")) / "plugin-data" / "session-review" / "config.json"
+    if config_file.exists():
+        configured = json.loads(config_file.read_text()).get(config_key)
+        if configured:
+            return Path(configured).expanduser()
+    return default
+
+
 def sessions_root() -> Path:
-    return Path(os.environ.get("HERMES_SESSIONS_ROOT", Path.home() / "Projects" / "sessions"))
+    return _setting("HERMES_SESSIONS_ROOT", "sessions_root", Path.home() / "Projects" / "sessions")
 
 
 def git(repo: Path, *args: str, check: bool = True) -> str:
@@ -111,7 +123,7 @@ SESSION_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 
 
 def repo_search_root() -> Path:
-    return Path(os.environ.get("HERMES_REPO_SEARCH_ROOT", Path.home() / "Projects"))
+    return _setting("HERMES_REPO_SEARCH_ROOT", "repo_search_root", Path.home() / "Projects")
 
 
 def list_candidate_repos() -> list[dict]:

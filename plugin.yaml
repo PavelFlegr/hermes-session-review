@@ -1,8 +1,11 @@
 name: session-review
 label: Session Review
 version: 0.1.0
+author: Pavel Flegr
+homepage: https://github.com/PavelFlegr/hermes-session-review
+license: MIT
+requires_hermes: ">=0.22.0"
 description: >
-  Merge-request style review of Hermes sessions. A session is a directory under
-  the sessions root; every child git worktree is an affected repo. The desktop
-  page shows a multi-repo diff, collects review comments and feeds them back
-  into the session.
+  Merge-request style review of Hermes sessions. A session is a directory of git worktrees;
+  a pane docked next to the chat shows the multi-repo diff, merge status and review comments,
+  and sends comments back into the session.

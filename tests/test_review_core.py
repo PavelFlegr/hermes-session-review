@@ -202,3 +202,15 @@ def test_session_state_summarises_repos():
     assert core.session_merge_state(["merged", "none"]) == "merged"
     assert core.session_merge_state(["merged", "partial"]) == "unmerged"
     assert core.session_merge_state(["unmerged"]) == "unmerged"
+
+
+def test_settings_come_from_env_then_config_file_then_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("HERMES_SESSIONS_ROOT", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    assert core.sessions_root() == Path.home() / "Projects" / "sessions"
+    config_dir = tmp_path / "home" / "plugin-data" / "session-review"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text('{"sessions_root": "~/work/reviews"}')
+    assert core.sessions_root() == Path.home() / "work" / "reviews"
+    monkeypatch.setenv("HERMES_SESSIONS_ROOT", str(tmp_path / "env"))
+    assert core.sessions_root() == tmp_path / "env"

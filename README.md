@@ -34,7 +34,7 @@ Then:
 - **New** in the pane: pick a name, optionally some repositories, and a task. Repositories can be left empty;
   the agent is told to add each one with `session-review add-repo <name> <path>` before editing it.
 - Agents get the helper at `<plugin dir>/bin/session-review` (`add-repo`, `comments`, `reply`) and a
-  `session-review-workflow` skill describing the rules.
+  `session-review:session-review-workflow` skill describing the rules (load it on demand with `skill_view`; plugin skills are not listed in the prompt index).
 - Merging is done in the source repo with ordinary git; the pane shows what has landed.
 
 ## Configuration

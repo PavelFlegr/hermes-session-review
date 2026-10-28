@@ -247,8 +247,10 @@ def format_comment_for_agent(comment: dict) -> str:
     if comment["line"]:
         where += f":{comment['line']}"
     return (f"Review comment {comment['id']} on {where}:\n{comment['thread'][-1]['body']}\n\n"
-            f"Make the change if needed, commit it, then answer with: "
-            f"{CLI_PATH} reply {comment['id']} \"<your answer>\" [--resolve]")
+            f"If a change is needed, make it and commit it. In every case, finish by RUNNING this "
+            f"shell command with your terminal tool (do not just print it); it is the only way your "
+            f"answer reaches the reviewer:\n"
+            f"{CLI_PATH} reply {comment['id']} \"<your answer>\" [--resolve]\n")
 
 
 # --- link to hermes sessions ------------------------------------------------

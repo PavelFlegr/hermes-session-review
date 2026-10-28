@@ -502,6 +502,35 @@ function Transcript({ storedSessionId }) {
   ] })
 }
 
+// --- merge indicators --------------------------------------------------------------------------
+
+const MERGED_GREEN = '#2ea043'
+const UNMERGED_AMBER = '#d29922'
+
+/** Label and colour for a repo's (or a whole session's) relation to its base branch. */
+export function mergeBadge(state, unmergedCommits = 0, totalCommits = 0) {
+  if (state === 'merged') return { label: 'Merged', color: MERGED_GREEN, icon: 'git-merge' }
+  if (state === 'partial') return { label: `${unmergedCommits} of ${totalCommits} unmerged`, color: UNMERGED_AMBER, icon: 'git-pull-request' }
+  if (state === 'unmerged') return { label: totalCommits ? `${unmergedCommits} unmerged` : 'Unmerged', color: UNMERGED_AMBER, icon: 'git-pull-request' }
+  return { label: 'No commits', color: 'var(--ui-text-quaternary)', icon: 'circle-outline' }
+}
+
+function MergeBadge({ state, unmergedCommits, totalCommits }) {
+  const badge = mergeBadge(state, unmergedCommits, totalCommits)
+  return jsxs('span', { className: 'inline-flex items-center gap-1 whitespace-nowrap', style: { color: badge.color }, children: [jsx(Codicon, { name: badge.icon }), badge.label] })
+}
+
+function CommitList({ commits }) {
+  return jsx('div', { className: 'mb-1 pl-5', children: commits.map(commit => jsxs('div', {
+    key: commit.sha, className: 'flex items-center gap-1.5 py-0.5', title: commit.merged ? 'In the base branch' : 'Not in the base branch yet', style: SELECTABLE,
+    children: [
+      jsx(Codicon, { name: commit.merged ? 'pass-filled' : 'circle-large-outline', style: { color: commit.merged ? MERGED_GREEN : UNMERGED_AMBER } }),
+      jsx('span', { className: 'font-mono', style: { color: 'var(--ui-text-tertiary)' }, children: commit.sha.slice(0, 7) }),
+      jsx('span', { className: 'min-w-0 truncate', children: commit.subject })
+    ]
+  })) })
+}
+
 // --- file tree ---------------------------------------------------------------------------------
 
 /**
@@ -612,10 +641,12 @@ function RepoTree({ repo, comments, selected, onSelect, query }) {
       jsx(Codicon, { name: repoOpen ? 'chevron-down' : 'chevron-right', style: { color: 'var(--ui-text-tertiary)' } }),
       jsx(Codicon, { name: 'repo' }),
       jsx('span', { className: 'min-w-0 truncate', children: repo.name }),
-      repo.uncommitted && jsx('span', { title: 'uncommitted changes', style: { color: '#d29922' }, children: '●' })
+      repo.uncommitted && jsx('span', { title: 'uncommitted changes', style: { color: UNMERGED_AMBER }, children: '●' }),
+      jsx('span', { className: 'ml-auto', children: jsx(MergeBadge, { state: repo.merge_state, unmergedCommits: repo.unmerged_commits, totalCommits: repo.commits.length }) })
     ] }),
     jsxs('div', { className: 'mb-1 pl-5', style: { color: 'var(--ui-text-tertiary)' }, children:
       `${repo.branch} → ${repo.base_branch} · ${repo.files.length} files · +${repo.additions} −${repo.deletions}` }),
+    repoOpen && repo.commits.length > 0 && jsx(CommitList, { commits: repo.commits }),
     repoOpen && jsx(TreeNodes, { nodes: buildFileTree(visibleFiles), depth: 0, repoName: repo.name, selected, onSelect, collapsed, toggle, openCommentsByPath, forceOpen: filtering })
   ] })
 }
@@ -677,6 +708,7 @@ function SessionDetail({ name, onGone, compact = false }) {
     jsxs('div', { className: 'flex flex-wrap items-center gap-3 border-b p-3 text-sm', style: { borderColor: 'var(--ui-stroke-secondary)' }, children: [
       jsx('b', { children: linked?.title || session.name }),
       jsx('span', { style: { color: 'var(--ui-text-tertiary)' }, children: `${session.repos.length} repos · ${session.comments.filter(c => c.status === 'open').length} open comments` }),
+      jsx(MergeBadge, { state: session.merge_state, unmergedCommits: session.unmerged_repos, totalCommits: 0 }),
       linked && jsx(Button, { variant: 'ghost', size: 'sm', onClick: () => host.openSession(linked.id, { intent: 'tab' }), children: 'Open session' }),
       linked && !compact && jsx(Button, { variant: 'ghost', size: 'sm', onClick: () => setShowTranscript(!showTranscript), children: showTranscript ? 'Hide transcript' : 'Show transcript' }),
       jsx('div', { className: 'ml-auto', children: jsx(DeletePanel, { session, onDeleted: () => { refresh(); onGone() } }) })
@@ -796,7 +828,7 @@ function ReviewPage() {
         children: [
           jsx('div', { className: 'truncate', children: session.hermes_sessions[0]?.title || session.name }),
           jsx('div', { className: 'text-xs', style: { color: 'var(--ui-text-tertiary)' },
-            children: `${session.repos} repos · +${session.additions} −${session.deletions}` + (session.open_comments ? ` · ${session.open_comments} open` : '') })
+            children: [`${session.repos} repos · +${session.additions} −${session.deletions}` + (session.open_comments ? ` · ${session.open_comments} open` : ''), ' · ', jsx(MergeBadge, { state: session.merge_state, unmergedCommits: session.unmerged_repos, totalCommits: 0 })] })
         ]
       })),
       sessions.length === 0 && jsx('div', { className: 'text-xs', children: 'No session directories yet.' })

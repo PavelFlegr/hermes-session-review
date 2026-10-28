@@ -82,3 +82,11 @@ test('filter matches paths case-insensitively', () => {
   assert.deepEqual(plugin.filterFiles(files, 'app').map(f => f.path), ['src/App.py'])
   assert.equal(plugin.filterFiles(files, '  ').length, 2)
 })
+
+test('merge badge wording', () => {
+  assert.equal(plugin.mergeBadge('merged').label, 'Merged')
+  assert.equal(plugin.mergeBadge('partial', 1, 3).label, '1 of 3 unmerged')
+  assert.equal(plugin.mergeBadge('unmerged', 2, 2).label, '2 unmerged')
+  assert.equal(plugin.mergeBadge('unmerged', 0, 0).label, 'Unmerged')
+  assert.equal(plugin.mergeBadge('none').label, 'No commits')
+})

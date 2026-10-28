@@ -54,7 +54,7 @@ def test_changes_cover_committed_uncommitted_and_untracked(workspace):
 
 def test_file_patch_for_tracked_and_untracked(workspace):
     _, _, worktree = workspace
-    base = core.resolve_repo_base(worktree).merge_base
+    base = core.resolve_repo_base(worktree).fork_point
     (worktree / "a.txt").write_text("one\nchanged\n")
     (worktree / "n.txt").write_text("fresh\n")
     assert "+changed" in core.file_patch(worktree, base, "a.txt")
@@ -136,3 +136,69 @@ def test_create_session_without_repos_makes_empty_directory(tmp_path, monkeypatc
     session = core.create_session("empty-one", [])
     assert session.is_dir() and core.list_worktrees(session) == []
     assert core.summarize_session(session)["repos"] == []
+
+
+def commit(worktree: Path, name: str) -> None:
+    (worktree / name).write_text(name)
+    run(worktree, "git", "add", name)
+    run(worktree, "git", "commit", "-qm", f"add {name}")
+
+
+@pytest.fixture
+def created(tmp_path, monkeypatch):
+    """Like `workspace`, but the worktree comes from create_session so the fork point is recorded."""
+    source = tmp_path / "proj"
+    source.mkdir()
+    run(source, "git", "init", "-q", "-b", "main")
+    run(source, "git", "config", "user.email", "t@example.com")
+    run(source, "git", "config", "user.name", "T")
+    (source / "a.txt").write_text("one\n")
+    run(source, "git", "add", "-A")
+    run(source, "git", "commit", "-qm", "init")
+    monkeypatch.setenv("HERMES_SESSIONS_ROOT", str(tmp_path / "root"))
+    session = core.create_session("s1", [source])
+    worktree = session / "proj"
+    run(worktree, "git", "config", "user.email", "t@example.com")
+    run(worktree, "git", "config", "user.name", "T")
+    return source, session, worktree
+
+
+def repo_summary(session: Path) -> dict:
+    return core.summarize_session(session)["repos"][0]
+
+
+def test_state_is_none_without_commits_then_unmerged(created):
+    _, session, worktree = created
+    assert repo_summary(session)["merge_state"] == "none"
+    commit(worktree, "one.txt")
+    summary = repo_summary(session)
+    assert (summary["merge_state"], summary["unmerged_commits"]) == ("unmerged", 1)
+    assert summary["commits"][0]["merged"] is False
+
+
+def test_merged_branch_still_shows_its_diff_and_is_marked_merged(created):
+    source, session, worktree = created
+    commit(worktree, "one.txt")
+    run(source, "git", "merge", "--no-ff", "-qm", "merge it", "hermes/s1")
+    summary = repo_summary(session)
+    assert (summary["merge_state"], summary["unmerged_commits"]) == ("merged", 0)
+    assert [f["path"] for f in summary["files"]] == ["one.txt"]  # diff survives the merge
+
+
+def test_partial_merge_counts_only_the_unmerged_commits(created):
+    source, session, worktree = created
+    commit(worktree, "one.txt")
+    run(source, "git", "merge", "--no-ff", "-qm", "merge first", "hermes/s1")
+    commit(worktree, "two.txt")
+    summary = repo_summary(session)
+    assert (summary["merge_state"], summary["unmerged_commits"]) == ("partial", 1)
+    assert [c["merged"] for c in summary["commits"]] == [False, True]  # newest first
+    assert core.summarize_session(session)["unmerged_repos"] == 1
+
+
+def test_session_state_summarises_repos():
+    assert core.session_merge_state([]) == "none"
+    assert core.session_merge_state(["none", "none"]) == "none"
+    assert core.session_merge_state(["merged", "none"]) == "merged"
+    assert core.session_merge_state(["merged", "partial"]) == "unmerged"
+    assert core.session_merge_state(["unmerged"]) == "unmerged"

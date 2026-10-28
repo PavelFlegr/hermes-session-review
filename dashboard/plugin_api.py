@@ -71,6 +71,9 @@ def list_sessions():
             "additions": sum(r["additions"] for r in summary["repos"]),
             "deletions": sum(r["deletions"] for r in summary["repos"]),
             "open_comments": summary["open_comments"],
+            "merge_state": summary["merge_state"],
+            "unmerged_repos": summary["unmerged_repos"],
+            "uncommitted_repos": sum(1 for r in summary["repos"] if r["uncommitted"]),
             "hermes_sessions": core.linked_hermes_sessions(session),
         })
     return {"root": str(core.sessions_root()), "sessions": rows}
@@ -104,7 +107,7 @@ def get_patch(name: str, repo: str, path: str):
     if not (worktree / path).resolve().is_relative_to(worktree.resolve()):
         raise HTTPException(400, "path escapes the worktree")
     base = core.resolve_repo_base(worktree)
-    return {"patch": core.file_patch(worktree, base.merge_base, path)}
+    return {"patch": core.file_patch(worktree, base.fork_point, path)}
 
 
 @router.post("/sessions/{name}/comments")

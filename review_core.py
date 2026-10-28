@@ -70,16 +70,29 @@ def list_worktrees(session: Path) -> list[Path]:
 @dataclass
 class RepoBase:
     source_repo: str   # the repo this worktree was created from
-    base_branch: str   # branch the session will merge into
-    merge_base: str    # commit the session branch forked from
+    base_branch: str   # branch the session's work is compared against
+    fork_point: str    # commit the session branch started from; the diff baseline
 
 
 def resolve_repo_base(worktree: Path) -> RepoBase:
     common_dir = Path(git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
     source_repo = common_dir.parent
     base_branch = _source_checked_out_branch(source_repo)
-    merge_base = git(worktree, "merge-base", "HEAD", base_branch).strip()
-    return RepoBase(str(source_repo), base_branch, merge_base)
+    return RepoBase(str(source_repo), base_branch, _fork_point(worktree, source_repo, base_branch))
+
+
+def _fork_point(worktree: Path, source_repo: Path, base_branch: str) -> str:
+    """The recorded session start, or (for sessions made before it was recorded) the merge-base."""
+    branch = git(worktree, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    recorded = git(source_repo, "config", f"branch.{branch}.sessionBase", check=False).strip()
+    if recorded and _commit_exists(source_repo, recorded):
+        return recorded
+    return git(worktree, "merge-base", "HEAD", base_branch).strip()
+
+
+def _commit_exists(repo: Path, commit: str) -> bool:
+    return subprocess.run(["git", "-C", str(repo), "cat-file", "-e", f"{commit}^{{commit}}"],
+                          capture_output=True).returncode == 0
 
 
 def _source_checked_out_branch(source_repo: Path) -> str:
@@ -122,7 +135,12 @@ def add_repo_to_session(session_name: str, source_repo: Path) -> Path:
     if target.exists():
         raise ReviewError(f"{target} already exists")
     session.mkdir(parents=True, exist_ok=True)
-    git(source_repo, "worktree", "add", "-b", f"hermes/{session_name}", str(target))
+    branch = f"hermes/{session_name}"
+    fork_point = git(source_repo, "rev-parse", "HEAD").strip()
+    git(source_repo, "worktree", "add", "-b", branch, str(target))
+    # Remember where the session started: after the branch is merged, the merge-base would equal HEAD
+    # and the review would show an empty diff.
+    git(source_repo, "config", f"branch.{branch}.sessionBase", fork_point)
     return target
 
 
@@ -212,9 +230,28 @@ def head_commit(worktree: Path) -> str:
     return git(worktree, "rev-parse", "HEAD").strip()
 
 
-def commit_log(worktree: Path, base_commit: str) -> list[dict]:
-    lines = git(worktree, "log", "--format=%H%x09%an%x09%at%x09%s", f"{base_commit}..HEAD").splitlines()
-    return [dict(zip(("sha", "author", "time", "subject"), line.split("\t", 3))) for line in lines]
+def commit_log(worktree: Path, base: RepoBase) -> list[dict]:
+    """Session commits, newest first, each marked with whether the base branch already contains it."""
+    lines = git(worktree, "log", "--format=%H%x09%an%x09%at%x09%s", f"{base.fork_point}..HEAD").splitlines()
+    commits = [dict(zip(("sha", "author", "time", "subject"), line.split("\t", 3))) for line in lines]
+    for commit in commits:
+        commit["merged"] = _is_ancestor(Path(base.source_repo), commit["sha"], base.base_branch)
+    return commits
+
+
+def merge_state(commits: list[dict]) -> str:
+    """none (nothing committed), merged (all in the base branch), partial, or unmerged."""
+    merged = sum(1 for c in commits if c["merged"])
+    if not commits:
+        return "none"
+    return "merged" if merged == len(commits) else "partial" if merged else "unmerged"
+
+
+def session_merge_state(repo_states: list[str]) -> str:
+    """Whole-session summary: unmerged if any repo has unmerged commits, merged if the rest are merged or empty."""
+    if any(state in ("unmerged", "partial") for state in repo_states):
+        return "unmerged"
+    return "merged" if "merged" in repo_states else "none"
 
 
 def has_uncommitted_changes(worktree: Path) -> bool:
@@ -225,19 +262,24 @@ def summarize_session(session: Path) -> dict:
     repos = []
     for worktree in list_worktrees(session):
         base = resolve_repo_base(worktree)
-        changes = list_file_changes(worktree, base.merge_base)
+        changes = list_file_changes(worktree, base.fork_point)
+        commits = commit_log(worktree, base)
         repos.append({
             "name": worktree.name,
             "branch": git(worktree, "rev-parse", "--abbrev-ref", "HEAD").strip(),
             **asdict(base),
             "head": head_commit(worktree),
-            "commits": commit_log(worktree, base.merge_base),
+            "commits": commits,
+            "merge_state": merge_state(commits),
+            "unmerged_commits": sum(1 for c in commits if not c["merged"]),
             "uncommitted": has_uncommitted_changes(worktree),
             "files": [asdict(c) for c in changes],
             "additions": sum(c.additions for c in changes),
             "deletions": sum(c.deletions for c in changes),
         })
     return {"name": session.name, "path": str(session), "repos": repos,
+            "merge_state": session_merge_state([r["merge_state"] for r in repos]),
+            "unmerged_repos": sum(1 for r in repos if r["unmerged_commits"] > 0),
             "open_comments": sum(1 for c in load_comments(session) if c["status"] == "open")}
 
 
